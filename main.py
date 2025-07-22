@@ -75,11 +75,11 @@ def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20
     upper_kc = ma + rangema * mult_kc
     lower_kc = ma - rangema * mult_kc
 
-    sqz_on = (lower_bb > lower_kc) and (upper_bb < upper_kc)
-    sqz_off = (lower_bb < lower_kc) and (upper_bb > upper_kc)
-    no_sqz = (sqz_on == False) and (sqz_off == False)
+    sqz_on = (lower_bb > lower_kc) & (upper_bb < upper_kc)
+    sqz_off = (lower_bb < lower_kc) & (upper_bb > upper_kc)
+    no_sqz = ~sqz_on & ~sqz_off
 
-    return sqz_on, sqz_off, no_sqz
+    return sqz_on[-1], sqz_off[-1], no_sqz[-1]  # Son mumun değerini al
 
 def calculate_squeeze_momentum(closes, sqz_on, sqz_off, no_sqz, length_kc=20):
     avg_hlc = (np.cumsum(closes) / length_kc)
@@ -89,7 +89,7 @@ def calculate_squeeze_momentum(closes, sqz_on, sqz_off, no_sqz, length_kc=20):
     val = np.roll(closes - (avg_hlc + avg_sma) / 2, -length_kc)  # Linreg approximation
     bcolor = np.where(val > 0, np.where(val > np.roll(val, 1), 'lime', 'green'), np.where(val < np.roll(val, 1), 'red', 'maroon'))
     scolor = np.where(no_sqz, 'blue', np.where(sqz_on, 'black', 'gray'))
-    return val, bcolor, scolor
+    return val[-1], bcolor[-1], scolor[-1]  # Son mumun değerini al
 
 async def check_signals(symbol, timeframe):
     try:
@@ -112,7 +112,7 @@ async def check_signals(symbol, timeframe):
         ema9_last = ema9[-1] if len(ema9) > 0 else 0
         ema20_last = ema20[-1] if len(ema20) > 0 else 0
         volume_increase = last_volume > avg_volume * 1.5  # %50 hacim artışı
-        squeeze_off = sqz_off[-1]  # Son mumda squeeze off mu?
+        squeeze_off = sqz_off  # Son mumda squeeze off mu?
 
         buy = False  # Long
         sell = False  # Short
