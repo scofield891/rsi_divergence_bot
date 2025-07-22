@@ -1,5 +1,4 @@
 ccxt
-ta-lib
 python-telegram-bot
 numpy
 python-dotenv
