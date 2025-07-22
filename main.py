@@ -51,21 +51,59 @@ def calculate_ema(closes, period):
     ema[0] = closes[0]
     multiplier = 2 / (period + 1)
     for i in range(1, len(closes)):
-        ema[i] = closes[i] * multiplier + ema[i-1] * (1 - multiplier) if i < len(closes) else ema[i-1]
+        ema[i] = closes[i] * multiplier + ema[i-1] * (1 - multiplier)
     return ema
 
 def calculate_volume_average(volumes, period=14):
     return np.mean(volumes[-period:]) if len(volumes) >= period else 0
 
+def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20, mult_kc=1.5, use_tr=True):
+    basis = np.cumsum(closes) / length_bb
+    basis = np.roll(basis, -1)
+    dev = mult_bb * np.roll(np.std(closes, ddof=0), -1)
+    upper_bb = basis + dev
+    lower_bb = basis - dev
+
+    ma = np.cumsum(closes) / length_kc
+    ma = np.roll(ma, -1)
+    if use_tr:
+        range_val = np.maximum(highs - lows, np.abs(highs - np.roll(closes, 1)), np.abs(lows - np.roll(closes, 1)))
+    else:
+        range_val = highs - lows
+    rangema = np.cumsum(range_val) / length_kc
+    rangema = np.roll(rangema, -1)
+    upper_kc = ma + rangema * mult_kc
+    lower_kc = ma - rangema * mult_kc
+
+    sqz_on = (lower_bb > lower_kc) and (upper_bb < upper_kc)
+    sqz_off = (lower_bb < lower_kc) and (upper_bb > upper_kc)
+    no_sqz = (sqz_on == False) and (sqz_off == False)
+
+    return sqz_on, sqz_off, no_sqz
+
+def calculate_squeeze_momentum(closes, sqz_on, sqz_off, no_sqz, length_kc=20):
+    avg_hlc = (np.cumsum(closes) / length_kc)
+    avg_hlc = np.roll(avg_hlc, -1)
+    avg_sma = np.cumsum(closes) / length_kc
+    avg_sma = np.roll(avg_sma, -1)
+    val = np.roll(closes - (avg_hlc + avg_sma) / 2, -length_kc)  # Linreg approximation
+    bcolor = np.where(val > 0, np.where(val > np.roll(val, 1), 'lime', 'green'), np.where(val < np.roll(val, 1), 'red', 'maroon'))
+    scolor = np.where(no_sqz, 'blue', np.where(sqz_on, 'black', 'gray'))
+    return val, bcolor, scolor
+
 async def check_signals(symbol, timeframe):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=30)
         closes = np.array([x[4] for x in ohlcv])
+        highs = np.array([x[2] for x in ohlcv])
+        lows = np.array([x[3] for x in ohlcv])
         volumes = np.array([x[5] for x in ohlcv])
 
         rsi = calculate_rsi(closes, 14)
         ema9 = calculate_ema(closes, 9)
         ema20 = calculate_ema(closes, 20)
+        sqz_on, sqz_off, no_sqz = calculate_bb_kc(closes, highs, lows)
+        val, bcolor, scolor = calculate_squeeze_momentum(closes, sqz_on, sqz_off, no_sqz)
         avg_volume = calculate_volume_average(volumes, 14)
         last_volume = volumes[-1]
 
@@ -74,25 +112,26 @@ async def check_signals(symbol, timeframe):
         ema9_last = ema9[-1] if len(ema9) > 0 else 0
         ema20_last = ema20[-1] if len(ema20) > 0 else 0
         volume_increase = last_volume > avg_volume * 1.5  # %50 hacim artışı
+        squeeze_off = sqz_off[-1]  # Son mumda squeeze off mu?
 
         buy = False  # Long
         sell = False  # Short
-        if ema9_last > ema20_last and last_rsi < 30 and prev_rsi > 30 and volume_increase:
+        if ema9_last > ema20_last and last_rsi < 30 and prev_rsi > 30 and volume_increase and squeeze_off:
             buy = True
-        elif ema9_last < ema20_last and last_rsi > 70 and prev_rsi < 70 and volume_increase:
+        elif ema9_last < ema20_last and last_rsi > 70 and prev_rsi < 70 and volume_increase and squeeze_off:
             sell = True
 
-        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, EMA9: {ema9_last:.2f}, EMA20: {ema20_last:.2f}, Volume Increase: {volume_increase}")
+        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, EMA9: {ema9_last:.2f}, EMA20: {ema20_last:.2f}, Volume Increase: {volume_increase}, Squeeze Off: {squeeze_off}")
 
         key = f"{symbol}_{timeframe}"
         last_signal = signal_cache.get(key, (False, False))
 
         if (buy, sell) != last_signal:
             if buy:
-                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı)"
+                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, Squeeze Off)"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             elif sell:
-                message = f"{symbol} {timeframe}: SELL 📉 (Negatif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı)"
+                message = f"{symbol} {timeframe}: SELL 📉 (Negatif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, Squeeze Off)"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             signal_cache[key] = (buy, sell)
 
