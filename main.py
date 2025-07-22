@@ -11,12 +11,11 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 
-exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'futures'}})
+exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}})  # USDT futures/perpetual için 'linear'
 
 telegram_bot = Bot(token=BOT_TOKEN)
 
-# Sinyal cache (symbol + timeframe için son sinyali tutar)
-signal_cache = {}
+signal_cache = {}  # Duplicate önleme
 
 def calculate_rsi(closes, period=14):
     deltas = np.diff(closes)
@@ -46,14 +45,15 @@ def calculate_rsi(closes, period=14):
 async def get_top_volume_symbols(limit=250):
     try:
         markets = exchange.load_markets()
-        futures_markets = [m for m in markets.values() if m['type'] == 'future' and m['active']]
-        sorted_markets = sorted(futures_markets, key=lambda x: float(x['info'].get('24h_volume', 0)), reverse=True)
-        symbols = [m['symbol'] for m in sorted_markets[:limit]]
-        print(f"En hacimli {limit} futures symbol yüklendi.")
-        return symbols
+        futures_markets = [m for m in markets if m['future'] and m['active']]
+        symbols = [m for m in futures_markets]
+        tickers = exchange.fetch_tickers(symbols)
+        sorted_symbols = sorted(tickers, key=lambda x: float(tickers[x].get('quoteVolume', 0)), reverse=True)[:limit]
+        print(f"En hacimli {limit} futures symbol yüklendi: {sorted_symbols[:10]}")
+        return sorted_symbols
     except Exception as e:
         print(f"Hacimli symbol çekme hatası: {str(e)}")
-        return ['PERP/USDT', 'BTC/USDT']  # Fallback
+        return ['SOL/USDT', 'ETH/USDT']  # Fallback senin istediğin gibi SOL ve ETH
 
 async def check_divergence(symbol, timeframe):
     try:
@@ -73,11 +73,9 @@ async def check_divergence(symbol, timeframe):
 
         print(f"{symbol} {timeframe}: Pozitif: {bullish}, Negatif: {bearish}, RSI: {last_rsi:.2f}")
 
-        # Cache anahtarı: symbol + timeframe
         key = f"{symbol}_{timeframe}"
         last_signal = signal_cache.get(key, (False, False))
 
-        # Sadece sinyal değiştiyse gönder (duplicate önleme)
         if (bullish, bearish) != last_signal:
             message = f"{symbol} {timeframe}: Pozitif Uyumsuzluk: {bullish} 🚀, Negatif Uyumsuzluk: {bearish} 📉, RSI: {last_rsi:.2f}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
@@ -95,7 +93,7 @@ async def main():
         for timeframe in timeframes:
             for symbol in symbols:
                 await check_divergence(symbol, timeframe)
-                await asyncio.sleep(1)  # Rate limit delay
+                await asyncio.sleep(1)  # Rate limit
         print("Tüm taramalar tamamlandı, 5 dakika bekleniyor...")
         await asyncio.sleep(300)
 
