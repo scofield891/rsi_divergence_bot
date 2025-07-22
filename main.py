@@ -65,6 +65,8 @@ async def check_divergence(symbol, timeframe):
         print(f"Hata ({symbol}): {str(e)}")
 
 async def main():
+    # Test mesajı ekledim, bot başladığında Telegram'a gönderir
+    await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + time.strftime('%H:%M:%S'))
     while True:
         for symbol in ['PERP/USDT', 'BTC/USDT']:
             await check_divergence(symbol, '1h')
