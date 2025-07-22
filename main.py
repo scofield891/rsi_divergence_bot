@@ -15,6 +15,9 @@ exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'futu
 
 telegram_bot = Bot(token=BOT_TOKEN)
 
+# Sinyal cache (symbol + timeframe için son sinyali tutar)
+signal_cache = {}
+
 def calculate_rsi(closes, period=14):
     deltas = np.diff(closes)
     seed = deltas[:period+1]
@@ -70,9 +73,15 @@ async def check_divergence(symbol, timeframe):
 
         print(f"{symbol} {timeframe}: Pozitif: {bullish}, Negatif: {bearish}, RSI: {last_rsi:.2f}")
 
-        if bullish or bearish:
-            message = f"{symbol} {timeframe}: Pozitif Uyumsuzluk: {bullish}, Negatif Uyumsuzluk: {bearish}, RSI: {last_rsi:.2f}"
+        # Cache anahtarı: symbol + timeframe
+        key = f"{symbol}_{timeframe}"
+        last_signal = signal_cache.get(key, (False, False))
+
+        # Sadece sinyal değiştiyse gönder (duplicate önleme)
+        if (bullish, bearish) != last_signal:
+            message = f"{symbol} {timeframe}: Pozitif Uyumsuzluk: {bullish} 🚀, Negatif Uyumsuzluk: {bearish} 📉, RSI: {last_rsi:.2f}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+            signal_cache[key] = (bullish, bearish)
 
     except Exception as e:
         print(f"Hata ({symbol} {timeframe}): {str(e)}")
