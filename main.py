@@ -55,23 +55,25 @@ def calculate_ema(closes, period):
     return ema
 
 def calculate_volume_average(volumes, period=14):
-    return np.mean(volumes[-period:]) if len(volumes) >= period else 0
+    if len(volumes) < period:
+        return 0
+    return np.mean(volumes[-period:])
 
 def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20, mult_kc=1.5, use_tr=True):
-    basis = np.cumsum(closes) / length_bb
-    basis = np.roll(basis, -1)
-    dev = mult_bb * np.roll(np.std(closes, ddof=0), -1)
+    if len(closes) < max(length_bb, length_kc):
+        return False, False, False  # Yetersiz veri, squeeze off varsay
+
+    basis = np.roll(np.cumsum(closes) / length_bb, -1)
+    dev = mult_bb * np.roll(np.std(closes), -1)
     upper_bb = basis + dev
     lower_bb = basis - dev
 
-    ma = np.cumsum(closes) / length_kc
-    ma = np.roll(ma, -1)
+    ma = np.roll(np.cumsum(closes) / length_kc, -1)
     if use_tr:
         range_val = np.maximum(highs - lows, np.abs(highs - np.roll(closes, 1)), np.abs(lows - np.roll(closes, 1)))
     else:
         range_val = highs - lows
-    rangema = np.cumsum(range_val) / length_kc
-    rangema = np.roll(rangema, -1)
+    rangema = np.roll(np.cumsum(range_val) / length_kc, -1)
     upper_kc = ma + rangema * mult_kc
     lower_kc = ma - rangema * mult_kc
 
@@ -82,14 +84,15 @@ def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20
     return sqz_on[-1], sqz_off[-1], no_sqz[-1]  # Son mumun değerini al
 
 def calculate_squeeze_momentum(closes, sqz_on, sqz_off, no_sqz, length_kc=20):
-    avg_hlc = (np.cumsum(closes) / length_kc)
-    avg_hlc = np.roll(avg_hlc, -1)
-    avg_sma = np.cumsum(closes) / length_kc
-    avg_sma = np.roll(avg_sma, -1)
+    if len(closes) < length_kc:
+        return 0, 'gray', 'gray'  # Yetersiz veri, neutral
+
+    avg_hlc = np.roll(np.cumsum(closes) / length_kc, -1)
+    avg_sma = np.roll(np.cumsum(closes) / length_kc, -1)
     val = np.roll(closes - (avg_hlc + avg_sma) / 2, -length_kc)  # Linreg approximation
-    bcolor = np.where(val > 0, np.where(val > np.roll(val, 1), 'lime', 'green'), np.where(val < np.roll(val, 1), 'red', 'maroon'))
-    scolor = np.where(no_sqz, 'blue', np.where(sqz_on, 'black', 'gray'))
-    return val[-1], bcolor[-1], scolor[-1]  # Son mumun değerini al
+    bcolor = 'lime' if val[-1] > 0 and val[-1] > val[-2] else 'green' if val[-1] > 0 else 'red' if val[-1] < val[-2] else 'maroon'
+    scolor = 'blue' if no_sqz else 'black' if sqz_on else 'gray'
+    return val[-1], bcolor, scolor  # Son mumun değerini al
 
 async def check_signals(symbol, timeframe):
     try:
@@ -105,7 +108,7 @@ async def check_signals(symbol, timeframe):
         sqz_on, sqz_off, no_sqz = calculate_bb_kc(closes, highs, lows)
         val, bcolor, scolor = calculate_squeeze_momentum(closes, sqz_on, sqz_off, no_sqz)
         avg_volume = calculate_volume_average(volumes, 14)
-        last_volume = volumes[-1]
+        last_volume = volumes[-1] if len(volumes) > 0 else 0
 
         last_rsi = rsi[-1] if len(rsi) > 0 else 0
         prev_rsi = rsi[-2] if len(rsi) > 1 else 0
