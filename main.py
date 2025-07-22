@@ -19,16 +19,16 @@ signal_cache = {}  # Duplicate önleme
 
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
-        return np.zeros(len(closes))  # Yetersiz veri varsa sıfırla
+        return np.zeros(len(closes))  # Yetersiz veri
     deltas = np.diff(closes)
-    seed = deltas[-period:]  # Son 14 mum için delta
+    seed = deltas[:period]
     up = seed[seed >= 0].sum() / period
     down = -seed[seed < 0].sum() / period
     rs = up / down if down != 0 else 0
-    rsi = np.zeros(len(closes))
-    rsi[-period:] = 100. - 100. / (1. + rs)  # Son 14 mum için başlangıç
+    rsi = np.zeros_like(closes)
+    rsi[:period] = 100. - 100. / (1. + rs)
 
-    for i in range(len(closes) - period, len(closes) - 1):
+    for i in range(period, len(closes)):
         delta = deltas[i-1]
         if delta > 0:
             upval = delta
@@ -46,7 +46,7 @@ def calculate_rsi(closes, period=14):
 
 async def check_divergence(symbol, timeframe):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=30)  # En fazla 30 mum
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=30)  # Son 30 mum
         closes = np.array([x[4] for x in ohlcv])
         rsi = calculate_rsi(closes, 14)
 
@@ -77,14 +77,14 @@ async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + time.strftime('%H:%M:%S'))
     timeframes = ['30m', '1h', '2h', '4h']
     symbols = [
-        'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'SUIUSDT', 'ADAUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', 'HYPEUSDT', '1000BONKUSDT', 'AVAXUSDT', 'LINKUSDT', 'MOODENGUSDT', 'PUMPFUNUSDT', 'TRUMPUSDT', 'LTCUSDT', 'SPKUSDT', 'AAVEUSDT', 'ARBUSDT', 'ONDOUSDT', 'NEARUSDT', 'POPCATUSDT', 'OPUSDT', 'SEIUSDT', '1000FLOKIUSDT', 'HBARUSDT', 'WLDUSDT', 'JUPUSDT', 'BNBUSDT', 'TONUSDT', 'UNIUSDT', 'XLMUSDT', 'VIRTUALUSDT', 'CRVUSDT', 'TIAUSDT', 'AI16ZUSDT', 'PNUTUSDT', 'GALAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'CFXUSDT', 'ETCUSDT', 'SPXUSDT', 'LDOUSDT', 'ENSUSDT', 'OMUSDT', 'SHIB1000USDT', 'BCHUSDT', 'ZORAUSDT', 'DRIFTUSDT', 'INJUSDT', 'JTOUSDT', 'RESOLVUSDT', 'UXLINKUSDT', 'KASUSDT', 'GOATUSDT', 'ETHFIUSDT', 'HYPERUSDT', 'ALGOUSDT', 'ORDIUSDT', 'RENDERUSDT', 'TRXUSDT', 'BRETTUSDT', 'XTZUSDT', 'LAUNCHCOINUSDT', 'STRKUSDT', '1000NEIROCTOUSDT', 'TRBUSDT', 'EIGENUSDT', 'BOMEUSDT', 'MOVEUSDT', 'PENDLEUSDT', 'MKRUSDT', 'FILUSDT', 'SOLAYERUSDT', 'MEWUSDT', 'HUSDT', 'SUSDT', 'ICPUSDT', 'ATOMUSDT', 'USELESSUSDT', 'BERAUSDT', 'POLUSDT', 'GRASSUSDT', 'AIXBTUSDT', 'SANDUSDT', 'STXUSDT', '1000000MOGUSDT', 'NOTUSDT', 'CHILLGUYUSDT', 'RUNEUSDT', 'COOKIEUSDT', 'PYTHUSDT', 'APEUSDT', 'IPUSDT', 'DYDXUSDT', 'JASMYUSDT', 'RAYDIUMUSDT', 'INITUSDT', 'SYRUPUSDT', 'BLURUSDT', 'GMTUSDT', 'AEROUSDT', 'KAITOUSDT', 'SUSHIUSDT', 'XAUTUSDT', 'ZROUSDT', 'MELANIAUSDT', 'GRTUSDT', 'CVXUSDT', 'USUALUSDT', 'ARKMUSDT', 'KAIAUSDT', '1INCHUSDT', 'ARUSDT', 'DEEPUSDT', 'FXSUSDT', 'MOCAUSDT', 'MANAUSDT', 'VETUSDT', 'PLUMEUSDT', 'MNTUSDT', 'NEIROETHUSDT', 'IMXUSDT', 'XMRUSDT', 'CAKEUSDT', 'AXSUSDT', 'THETAUSDT', 'COMPUSDT', 'MASKUSDT', 'LPTUSDT', 'FLRUSDT', 'CROUSDT', 'ZKUSDT', 'BANANAS31USDT', 'BEAMUSDT', 'DOGUSDT', 'NILUSDT', 'PAXGUSDT', 'SAROSUSDT', 'ATHUSDT', 'ALCHUSDT', 'KAVAUSDT', 'SUNDOGUSDT'
-    ]
+        'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'ADAUSDT', 'SUIUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', '1000BONKUSDT', 'HYPEUSDT', 'AVAXUSDT', 'MOODENGUSDT', 'LINKUSDT', 'PUMPFUNUSDT', 'LTCUSDT', 'TRUMPUSDT', 'AAVEUSDT', 'ARBUSDT', 'NEARUSDT', 'ONDOUSDT', 'POPCATUSDT', 'TONUSDT', 'OPUSDT', '1000FLOKIUSDT', 'SEIUSDT', 'HBARUSDT', 'WLDUSDT', 'BNBUSDT', 'UNIUSDT', 'XLMUSDT', 'CRVUSDT', 'VIRTUALUSDT', 'AI16ZUSDT', 'TIAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'SPXUSDT', 'ETCUSDT', 'LDOUSDT', 'BCHUSDT', 'INJUSDT', 'KASUSDT', 'ALGOUSDT', 'TRXUSDT', 'IPUSDT'
+    ]  # Senin gönderdiğin coin listesi (yaklaşık 60 tane, SOL ve ETH dahil)
 
     while True:
         for timeframe in timeframes:
             for symbol in symbols:
                 await check_divergence(symbol, timeframe)
-                await asyncio.sleep(1)  # Rate limit
+                await asyncio.sleep(1)  # Rate limit delay
         print("Tüm taramalar tamamlandı, 5 dakika bekleniyor...")
         await asyncio.sleep(300)
 
