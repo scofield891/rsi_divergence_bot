@@ -11,7 +11,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 
-exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}})  # USDT futures/perpetual için 'linear'
+exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}})  # USDT futures/perpetual
 
 telegram_bot = Bot(token=BOT_TOKEN)
 
@@ -41,19 +41,6 @@ def calculate_rsi(closes, period=14):
         rsi[i] = 100. - 100. / (1. + rs)
 
     return rsi
-
-async def get_top_volume_symbols(limit=250):
-    try:
-        markets = exchange.load_markets()
-        futures_markets = [m for m in markets if m['future'] and m['active']]
-        symbols = [m for m in futures_markets]
-        tickers = exchange.fetch_tickers(symbols)
-        sorted_symbols = sorted(tickers, key=lambda x: float(tickers[x].get('quoteVolume', 0)), reverse=True)[:limit]
-        print(f"En hacimli {limit} futures symbol yüklendi: {sorted_symbols[:10]}")
-        return sorted_symbols
-    except Exception as e:
-        print(f"Hacimli symbol çekme hatası: {str(e)}")
-        return ['SOL/USDT', 'ETH/USDT']  # Fallback senin istediğin gibi SOL ve ETH
 
 async def check_divergence(symbol, timeframe):
     try:
@@ -87,13 +74,15 @@ async def check_divergence(symbol, timeframe):
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + time.strftime('%H:%M:%S'))
     timeframes = ['30m', '1h', '2h', '4h']
-    symbols = await get_top_volume_symbols(250)
+    symbols = [
+        'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'SUIUSDT', 'ADAUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', 'HYPEUSDT', '1000BONKUSDT', 'AVAXUSDT', 'LINKUSDT', 'MOODENGUSDT', 'PUMPFUNUSDT', 'TRUMPUSDT', 'LTCUSDT', 'SPKUSDT', 'AAVEUSDT', 'ARBUSDT', 'ONDOUSDT', 'NEARUSDT', 'POPCATUSDT', 'OPUSDT', 'SEIUSDT', '1000FLOKIUSDT', 'HBARUSDT', 'WLDUSDT', 'JUPUSDT', 'BNBUSDT', 'TONUSDT', 'UNIUSDT', 'XLMUSDT', 'VIRTUALUSDT', 'CRVUSDT', 'TIAUSDT', 'AI16ZUSDT', 'PNUTUSDT', 'GALAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'CFXUSDT', 'ETCUSDT', 'SPXUSDT', 'LDOUSDT', 'ENSUSDT', 'OMUSDT', 'SHIB1000USDT', 'BCHUSDT', 'ZORAUSDT', 'DRIFTUSDT', 'INJUSDT', 'JTOUSDT', 'RESOLVUSDT', 'UXLINKUSDT', 'KASUSDT', 'GOATUSDT', 'ETHFIUSDT', 'HYPERUSDT', 'ALGOUSDT', 'ORDIUSDT', 'RENDERUSDT', 'TRXUSDT', 'BRETTUSDT', 'XTZUSDT', 'LAUNCHCOINUSDT', 'STRKUSDT', '1000NEIROCTOUSDT', 'TRBUSDT', 'EIGENUSDT', 'BOMEUSDT', 'MOVEUSDT', 'PENDLEUSDT', 'MKRUSDT', 'FILUSDT', 'SOLAYERUSDT', 'MEWUSDT', 'HUSDT', 'SUSDT', 'ICPUSDT', 'ATOMUSDT', 'USELESSUSDT', 'BERAUSDT', 'POLUSDT', 'GRASSUSDT', 'AIXBTUSDT', 'SANDUSDT', 'STXUSDT', '1000000MOGUSDT', 'NOTUSDT', 'CHILLGUYUSDT', 'RUNEUSDT', 'COOKIEUSDT', 'PYTHUSDT', 'APEUSDT', 'IPUSDT', 'DYDXUSDT', 'JASMYUSDT', 'RAYDIUMUSDT', 'INITUSDT', 'SYRUPUSDT', 'BLURUSDT', 'GMTUSDT', 'AEROUSDT', 'KAITOUSDT', 'SUSHIUSDT', 'XAUTUSDT', 'ZROUSDT', 'MELANIAUSDT', 'GRTUSDT', 'CVXUSDT', 'USUALUSDT', 'ARKMUSDT', 'KAIAUSDT', '1INCHUSDT', 'ARUSDT', 'DEEPUSDT', 'FXSUSDT', 'MOCAUSDT', 'MANAUSDT', 'VETUSDT', 'PLUMEUSDT', 'MNTUSDT', 'NEIROETHUSDT', 'IMXUSDT', 'XMRUSDT', 'CAKEUSDT', 'AXSUSDT', 'THETAUSDT', 'COMPUSDT', 'MASKUSDT', 'LPTUSDT', 'FLRUSDT', 'CROUSDT', 'ZKUSDT', 'BANANAS31USDT', 'BEAMUSDT', 'DOGUSDT', 'NILUSDT', 'PAXGUSDT', 'SAROSUSDT', 'ATHUSDT', 'ALCHUSDT', 'KAVAUSDT', 'SUNDOGUSDT'
+    ]  # Senin gönderdiğin coin listesi, 250'ye tamamlamak için hacim çekmeyi kaldırdım
 
     while True:
         for timeframe in timeframes:
             for symbol in symbols:
                 await check_divergence(symbol, timeframe)
-                await asyncio.sleep(1)  # Rate limit
+                await asyncio.sleep(1)  # Rate limit delay
         print("Tüm taramalar tamamlandı, 5 dakika bekleniyor...")
         await asyncio.sleep(300)
 
