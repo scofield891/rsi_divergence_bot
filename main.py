@@ -51,7 +51,7 @@ def calculate_ema(closes, period):
     ema[0] = closes[0]
     multiplier = 2 / (period + 1)
     for i in range(1, len(closes)):
-        ema[i] = closes[i] * multiplier + ema[i-1] * (1 - multiplier)
+        ema[i] = closes[i] * multiplier + ema[i-1] * (1 - multiplier) if i < len(closes) else ema[i-1]
     return ema
 
 def calculate_volume_average(volumes, period=14):
@@ -69,10 +69,10 @@ async def check_signals(symbol, timeframe):
         avg_volume = calculate_volume_average(volumes, 14)
         last_volume = volumes[-1]
 
-        last_rsi = rsi[-1]
-        prev_rsi = rsi[-2]
-        ema9_last = ema9[-1]
-        ema20_last = ema20_last[-1]
+        last_rsi = rsi[-1] if len(rsi) > 0 else 0
+        prev_rsi = rsi[-2] if len(rsi) > 1 else 0
+        ema9_last = ema9[-1] if len(ema9) > 0 else 0
+        ema20_last = ema20[-1] if len(ema20) > 0 else 0
         volume_increase = last_volume > avg_volume * 1.5  # %50 hacim artışı
 
         buy = False  # Long
