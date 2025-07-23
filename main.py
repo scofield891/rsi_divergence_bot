@@ -68,19 +68,23 @@ def calculate_vwap(highs, lows, closes, volumes):
     vwap = cum_tp_vol / cum_vol
     return vwap[-1]  # Son VWAP değeri
 
-# Opsiyonel MACD: Aktif etmek istersen uncomment et
-# def calculate_macd(closes, fast=12, slow=26, signal=9):
-#     ema_fast = calculate_ema(closes, fast)
-#     ema_slow = calculate_ema(closes, slow)
-#     macd = ema_fast - ema_slow
-#     signal_line = calculate_ema(macd, signal)
-#     return macd[-1], signal_line[-1]  # macd > signal for bullish
+def calculate_atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return 0
+    tr = np.maximum(highs[1:] - lows[1:], np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1]))
+    atr = np.zeros(len(closes))
+    atr[period] = np.mean(tr[:period])
+    for i in range(period + 1, len(closes)):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i-1]) / period
+    return atr[-1]  # Son ATR değeri
 
 async def check_signals(symbol, timeframe):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=50)
         if not ohlcv or len(ohlcv) < 50:
-            print(f"Uyarı ({symbol} {timeframe}): Yetersiz veri, ohlcv uzunluğu: {len(ohlcv)}")
+            message = f"Uyarı ({symbol} {timeframe}): Yetersiz veri, ohlcv uzunluğu: {len(ohlcv)}"
+            print(message)
+            await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             return
         closes = np.array([x[4] for x in ohlcv])
         highs = np.array([x[2] for x in ohlcv])
@@ -93,39 +97,46 @@ async def check_signals(symbol, timeframe):
         avg_volume = calculate_volume_average(volumes, 14)
         last_volume = volumes[-1] if len(volumes) > 0 else 0
         vwap = calculate_vwap(highs, lows, closes, volumes)
+        atr = calculate_atr(highs, lows, closes)
 
         last_rsi = rsi[-1] if len(rsi) > 0 else 0
         prev_rsi = rsi[-2] if len(rsi) > 1 else 0
         ema9_last = ema9[-1] if len(ema9) > 0 else 0
         ema20_last = ema20[-1] if len(ema20) > 0 else 0
         volume_increase = last_volume > avg_volume * 1.2  # %20 hacim artışı
-
-        # macd, signal_line = calculate_macd(closes)  # MACD opsiyonel, uncomment et
-        # macd_bullish = macd > signal_line
+        current_price = closes[-1]
 
         buy = False  # Long
         sell = False  # Short
-        if ema9_last > ema20_last and closes[-1] > ema9_last and last_rsi < 30 and prev_rsi > 30 and volume_increase and closes[-1] > vwap:  # EMA crossover, ADX çıkarıldı
+        stop_loss = 0
+        take_profit = 0
+        if ema9_last > ema20_last and current_price > ema9_last and last_rsi < 30 and prev_rsi > 30 and volume_increase and current_price > vwap:
             buy = True
-        elif ema9_last < ema20_last and closes[-1] < ema9_last and last_rsi > 70 and prev_rsi < 70 and volume_increase and closes[-1] < vwap:
+            stop_loss = current_price - 1.5 * atr  # Buy için stop-loss
+            take_profit = current_price + (current_price - stop_loss) * 2  # 2:1 R:R
+        elif ema9_last < ema20_last and current_price < ema9_last and last_rsi > 70 and prev_rsi < 70 and volume_increase and current_price < vwap:
             sell = True
+            stop_loss = current_price + 1.5 * atr  # Sell için stop-loss
+            take_profit = current_price - (stop_loss - current_price) * 2
 
-        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, EMA9: {ema9_last:.2f}, EMA20: {ema20_last:.2f}, Volume Increase: {volume_increase}, VWAP: {vwap:.2f}")
+        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, EMA9: {ema9_last:.2f}, EMA20: {ema20_last:.2f}, Volume Increase: {volume_increase}, VWAP: {vwap:.2f}, ATR: {atr:.2f}, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f}")
 
         key = f"{symbol}_{timeframe}"
         last_signal = signal_cache.get(key, (False, False))
 
         if (buy, sell) != last_signal:
             if buy:
-                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, EMA Crossover, Price > VWAP)"
+                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, EMA Crossover, Price > VWAP, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             elif sell:
-                message = f"{symbol} {timeframe}: SELL 📉 (Negatif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, EMA Crossover, Price < VWAP)"
+                message = f"{symbol} {timeframe}: SELL 📉 (Negatif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, EMA Crossover, Price < VWAP, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             signal_cache[key] = (buy, sell)
 
     except Exception as e:
-        print(f"Hata ({symbol} {timeframe}): {str(e)}")
+        error_msg = f"Hata ({symbol} {timeframe}): {str(e)}"
+        print(error_msg)
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=error_msg)
 
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Deneme Botu başladı, saat: " + time.strftime('%H:%M:%S'))
