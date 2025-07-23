@@ -61,7 +61,7 @@ def calculate_volume_average(volumes, period=14):
 
 def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20, mult_kc=1.5, use_tr=True):
     if len(closes) < max(length_bb, length_kc):
-        return False, False, False  # Yetersiz veri, squeeze off varsay
+        return False, False, False
 
     basis = np.roll(np.cumsum(closes) / length_bb, -1)
     dev = mult_bb * np.roll(np.std(closes), -1)
@@ -81,22 +81,24 @@ def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20
     sqz_off = (lower_bb < lower_kc) & (upper_bb > upper_kc)
     no_sqz = ~sqz_on & ~sqz_off
 
-    return sqz_on[-1], sqz_off[-1], no_sqz[-1]  # Son mumun değerini al
+    return sqz_on[-1], sqz_off[-1], no_sqz[-1]
 
 def calculate_squeeze_momentum(closes, sqz_on, sqz_off, no_sqz, length_kc=20):
     if len(closes) < length_kc:
-        return 0, 'gray', 'gray'  # Yetersiz veri, neutral
-
+        return 0, 'gray', 'gray'
     avg_hlc = np.roll(np.cumsum(closes) / length_kc, -1)
     avg_sma = np.roll(np.cumsum(closes) / length_kc, -1)
-    val = np.roll(closes - (avg_hlc + avg_sma) / 2, -length_kc)  # Linreg approximation
+    val = np.roll(closes - (avg_hlc + avg_sma) / 2, -length_kc)
     bcolor = 'lime' if val[-1] > 0 and val[-1] > val[-2] else 'green' if val[-1] > 0 else 'red' if val[-1] < val[-2] else 'maroon'
     scolor = 'blue' if no_sqz else 'black' if sqz_on else 'gray'
-    return val[-1], bcolor, scolor  # Son mumun değerini al
+    return val[-1], bcolor, scolor
 
 async def check_signals(symbol, timeframe):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=30)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=30)  # 30 mum geri döndü
+        if not ohlcv or len(ohlcv) < 30:
+            print(f"Uyarı ({symbol} {timeframe}): Yetersiz veri, ohlcv uzunluğu: {len(ohlcv)}")
+            return
         closes = np.array([x[4] for x in ohlcv])
         highs = np.array([x[2] for x in ohlcv])
         lows = np.array([x[3] for x in ohlcv])
@@ -114,8 +116,8 @@ async def check_signals(symbol, timeframe):
         prev_rsi = rsi[-2] if len(rsi) > 1 else 0
         ema9_last = ema9[-1] if len(ema9) > 0 else 0
         ema20_last = ema20[-1] if len(ema20) > 0 else 0
-        volume_increase = last_volume > avg_volume * 1.5  # %50 hacim artışı
-        squeeze_off = sqz_off  # Son mumda squeeze off mu?
+        volume_increase = last_volume > avg_volume * 1.3  # %30 hacim artışı
+        squeeze_off = sqz_off
 
         buy = False  # Long
         sell = False  # Short
@@ -143,7 +145,7 @@ async def check_signals(symbol, timeframe):
 
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Deneme Botu başladı, saat: " + time.strftime('%H:%M:%S'))
-    timeframes = ['1h', '4h']
+    timeframes = ['1h', '2h', '4h']  # 2h var
     symbols = [
         'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'ADAUSDT', 'SUIUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', '1000BONKUSDT', 'HYPEUSDT', 'AVAXUSDT', 'MOODENGUSDT', 'LINKUSDT', 'PUMPFUNUSDT', 'LTCUSDT', 'TRUMPUSDT', 'AAVEUSDT', 'ARBUSDT', 'NEARUSDT', 'ONDOUSDT', 'POPCATUSDT', 'TONUSDT', 'OPUSDT', '1000FLOKIUSDT', 'SEIUSDT', 'HBARUSDT', 'WLDUSDT', 'BNBUSDT', 'UNIUSDT', 'XLMUSDT', 'CRVUSDT', 'VIRTUALUSDT', 'AI16ZUSDT', 'TIAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'SPXUSDT', 'ETCUSDT', 'LDOUSDT', 'BCHUSDT', 'INJUSDT', 'KASUSDT', 'ALGOUSDT', 'TRXUSDT', 'IPUSDT'
     ]
