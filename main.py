@@ -27,27 +27,20 @@ def calculate_rsi(closes, period=14):
     rs = up / down if down != 0 else 0
     rsi = np.zeros_like(closes)
     rsi[:period] = 100. - 100. / (1. + rs)
-
     for i in range(period, len(closes)):
         delta = deltas[i-1]
-        if delta > 0:
-            upval = delta
-            downval = 0.
-        else:
-            upval = 0.
-            downval = -delta
-
+        upval = delta if delta > 0 else 0
+        downval = -delta if delta < 0 else 0
         up = (up * (period - 1) + upval) / period
         down = (down * (period - 1) + downval) / period
         rs = up / down if down != 0 else 0
         rsi[i] = 100. - 100. / (1. + rs)
-
     return rsi
 
 def calculate_ema(closes, period):
-    ema = np.zeros(len(closes))
     if len(closes) == 0:
-        return ema
+        return np.array([])
+    ema = np.zeros(len(closes))
     ema[0] = closes[0]
     multiplier = 2 / (period + 1)
     for i in range(1, len(closes)):
@@ -55,28 +48,30 @@ def calculate_ema(closes, period):
     return ema
 
 def calculate_volume_average(volumes, period=14):
-    if len(volumes) < period:
-        return 0
-    return np.mean(volumes[-period:])
+    return np.mean(volumes[-period:]) if len(volumes) >= period else 0
 
-def calculate_vwap(highs, lows, closes, volumes):
-    if len(closes) == 0:
-        return 0
-    typical_prices = (highs + lows + closes) / 3
-    cum_tp_vol = np.cumsum(typical_prices * volumes)
-    cum_vol = np.cumsum(volumes)
-    vwap = cum_tp_vol / cum_vol
-    return vwap[-1]  # Son VWAP değeri
+def calculate_rolling_vwap(highs, lows, closes, volumes, window=48):  # 48 mum, 2 gün
+    vwap = np.zeros(len(closes))
+    for i in range(window - 1, len(closes)):
+        slice_highs = highs[i - window + 1:i + 1]
+        slice_lows = lows[i - window + 1:i + 1]
+        slice_closes = closes[i - window + 1:i + 1]
+        slice_volumes = volumes[i - window + 1:i + 1]
+        typical_prices = (slice_highs + slice_lows + slice_closes) / 3
+        cum_tp_vol = np.sum(typical_prices * slice_volumes)
+        cum_vol = np.sum(slice_volumes)
+        vwap[i] = cum_tp_vol / cum_vol if cum_vol != 0 else 0
+    return vwap
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
         return 0
-    tr = np.maximum(highs[1:] - lows[1:], np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1]))
+    tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
     atr = np.zeros(len(closes))
     atr[period] = np.mean(tr[:period])
     for i in range(period + 1, len(closes)):
         atr[i] = (atr[i-1] * (period - 1) + tr[i-1]) / period
-    return atr[-1]  # Son ATR değeri
+    return atr[-1]
 
 async def check_signals(symbol, timeframe):
     try:
@@ -94,42 +89,42 @@ async def check_signals(symbol, timeframe):
         rsi = calculate_rsi(closes, 14)
         ema9 = calculate_ema(closes, 9)
         ema20 = calculate_ema(closes, 20)
+        vwap = calculate_rolling_vwap(highs, lows, closes, volumes)
         avg_volume = calculate_volume_average(volumes, 14)
         last_volume = volumes[-1] if len(volumes) > 0 else 0
-        vwap = calculate_vwap(highs, lows, closes, volumes)
         atr = calculate_atr(highs, lows, closes)
 
         last_rsi = rsi[-1] if len(rsi) > 0 else 0
         prev_rsi = rsi[-2] if len(rsi) > 1 else 0
         ema9_last = ema9[-1] if len(ema9) > 0 else 0
         ema20_last = ema20[-1] if len(ema20) > 0 else 0
-        volume_increase = last_volume > avg_volume * 1.2  # %20 hacim artışı
+        vwap_last = vwap[-1] if len(vwap) > 0 else 0
+        volume_increase = last_volume > avg_volume  # Ortalama üstü
         current_price = closes[-1]
 
-        buy = False  # Long
-        sell = False  # Short
+        buy = False
+        sell = False
         stop_loss = 0
         take_profit = 0
-        if ema9_last > ema20_last and current_price > ema9_last and last_rsi < 30 and prev_rsi > 30 and volume_increase and current_price > vwap:
+        if ema9_last > ema20_last and current_price > ema9_last and last_rsi < 40 and prev_rsi > 40 and volume_increase and current_price > vwap_last:
             buy = True
-            stop_loss = current_price - 1.5 * atr  # Buy için stop-loss
-            take_profit = current_price + (current_price - stop_loss) * 2  # 2:1 R:R
-        elif ema9_last < ema20_last and current_price < ema9_last and last_rsi > 70 and prev_rsi < 70 and volume_increase and current_price < vwap:
+            stop_loss = current_price - 1.5 * atr
+            take_profit = current_price + (current_price - stop_loss) * 2
+        elif ema9_last < ema20_last and current_price < ema9_last and last_rsi > 60 and prev_rsi < 60 and volume_increase and current_price < vwap_last:
             sell = True
-            stop_loss = current_price + 1.5 * atr  # Sell için stop-loss
+            stop_loss = current_price + 1.5 * atr
             take_profit = current_price - (stop_loss - current_price) * 2
 
-        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, EMA9: {ema9_last:.2f}, EMA20: {ema20_last:.2f}, Volume Increase: {volume_increase}, VWAP: {vwap:.2f}, ATR: {atr:.2f}, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f}")
+        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, EMA9: {ema9_last:.2f}, EMA20: {ema20_last:.2f}, Volume Increase: {volume_increase}, VWAP: {vwap_last:.2f}, ATR: {atr:.2f}, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f}")
 
         key = f"{symbol}_{timeframe}"
         last_signal = signal_cache.get(key, (False, False))
-
         if (buy, sell) != last_signal:
             if buy:
-                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, EMA Crossover, Price > VWAP, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: BUY 🚀 (RSI Divergence: {last_rsi:.2f}, Volume Up, EMA Crossover, Price > VWAP, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             elif sell:
-                message = f"{symbol} {timeframe}: SELL 📉 (Negatif Uyumsuzluk, RSI: {last_rsi:.2f}, Hacim Artışı, EMA Crossover, Price < VWAP, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: SELL 📉 (RSI Divergence: {last_rsi:.2f}, Volume Up, EMA Crossover, Price < VWAP, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             signal_cache[key] = (buy, sell)
 
