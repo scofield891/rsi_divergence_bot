@@ -117,25 +117,33 @@ def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, len
 
 def calculate_trp_resistance(closes, highs):
     count = 0
+    max_count = 0
+    resistance = 0
     for i in range(4, len(closes)):
         if closes[i] > closes[i-4]:
             count += 1
         else:
             count = 0
-        if count >= 9:
-            return np.max(highs[i-8:i+1])
-    return 0
+        if count > max_count:
+            max_count = count
+            if max_count >= 9:
+                resistance = np.max(highs[i-max_count+1:i+1])
+    return resistance
 
 def calculate_trp_support(closes, lows):
     count = 0
+    max_count = 0
+    support = float('inf')
     for i in range(4, len(closes)):
         if closes[i] < closes[i-4]:
             count += 1
         else:
             count = 0
-        if count >= 9:
-            return np.min(lows[i-8:i+1])
-    return float('inf')
+        if count > max_count:
+            max_count = count
+            if max_count >= 9:
+                support = np.min(lows[i-max_count+1:i+1])
+    return support
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
@@ -163,7 +171,7 @@ async def check_signals(symbol, timeframe):
         rsi = calculate_rsi(closes, 14)
         sqz_on, sqz_off, no_sqz = calculate_bb_kc(closes, highs, lows)
         val, bcolor, scolor = calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz)
-        prev_val, prev_bcolor, scolor = calculate_squeeze_momentum(closes[:-1], highs[:-1], lows[:-1], sqz_on, sqz_off, no_sqz) if len(closes) > 1 else (0, 'gray', 'gray')
+        prev_val, prev_bcolor, prev_scolor = calculate_squeeze_momentum(closes[:-1], highs[:-1], lows[:-1], sqz_on, sqz_off, no_sqz) if len(closes) > 1 else (0, 'gray', 'gray')
         td_resistance = calculate_trp_resistance(closes, highs)
         td_support = calculate_trp_support(closes, lows)
         atr = calculate_atr(highs, lows, closes)
@@ -171,16 +179,18 @@ async def check_signals(symbol, timeframe):
         last_rsi = rsi[-1] if len(rsi) > 0 else 0
         prev_rsi = rsi[-2] if len(rsi) > 1 else 0
         current_price = closes[-1]
+        current_high = highs[-1]
+        current_low = lows[-1]
 
         buy = False
         sell = False
         stop_loss = 0
         take_profit = 0
-        if last_rsi > 35 and prev_rsi < 35 and bcolor == 'maroon' and prev_bcolor == 'red' and current_price <= td_support:
+        if last_rsi > 35 and prev_rsi < 35 and bcolor == 'maroon' and prev_bcolor == 'red' and current_low <= td_support:
             buy = True
             stop_loss = current_price - 1.5 * atr
             take_profit = current_price + (current_price - stop_loss) * 2
-        elif last_rsi < 65 and prev_rsi > 65 and bcolor == 'green' and prev_bcolor == 'lime' and current_price >= td_resistance:
+        elif last_rsi < 65 and prev_rsi > 65 and bcolor == 'green' and prev_bcolor == 'lime' and current_high >= td_resistance:
             sell = True
             stop_loss = current_price + 1.5 * atr
             take_profit = current_price - (stop_loss - current_price) * 2
@@ -192,10 +202,10 @@ async def check_signals(symbol, timeframe):
 
         if (buy, sell) != last_signal:
             if buy:
-                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif RSI Uyumsuzluk, Squeeze Kırmızıdan Koyu Kırmızıya, Price <= TD Support, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif RSI Uyumsuzluk, Squeeze Kırmızıdan Koyu Kırmızıya, Candle <= TD Support, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             elif sell:
-                message = f"{symbol} {timeframe}: SELL 📉 (Negatif RSI Uyumsuzluk, Squeeze Yeşilden Koyu Yeşile, Price >= TD Resistance, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: SELL 📉 (Negatif RSI Uyumsuzluk, Squeeze Yeşilden Koyu Yeşile, Candle >= TD Resistance, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             signal_cache[key] = (buy, sell)
 
