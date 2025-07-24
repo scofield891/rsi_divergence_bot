@@ -206,10 +206,10 @@ async def check_signals(symbol, timeframe):
         td_support = calculate_trp_support(closes, lows)
         atr = calculate_atr(highs, lows, closes)
 
-        # Hacim filter ekle
+        # Hacim filter (düşürüldü 1.2x'e)
         avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else 0
         current_volume = volumes[-1]
-        high_volume = current_volume > 1.5 * avg_volume
+        high_volume = current_volume > 1.2 * avg_volume
 
         bullish_div = find_rsi_divergence(closes, rsi_ema, is_bullish=True)
         bearish_div = find_rsi_divergence(closes, rsi_ema, is_bullish=False)
@@ -250,7 +250,7 @@ async def check_signals(symbol, timeframe):
 
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Deneme Botu başladı, saat: " + time.strftime('%H:%M:%S'))
-    timeframes = ['1h', '2h', '4h']  # 2h eklendi
+    timeframes = ['30m', '1h', '2h', '4h']  # 30m eklendi
     symbols = [
         'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'ADAUSDT', 'SUIUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', '1000BONKUSDT', 'HYPEUSDT', 'AVAXUSDT', 'MOODENGUSDT', 'LINKUSDT', 'PUMPFUNUSDT', 'LTCUSDT', 'TRUMPUSDT', 'AAVEUSDT', 'ARBUSDT', 'NEARUSDT', 'ONDOUSDT', 'POPCATUSDT', 'TONUSDT', 'OPUSDT', '1000FLOKIUSDT', 'SEIUSDT', 'HBARUSDT', 'WLDUSDT', 'BNBUSDT', 'UNIUSDT', 'XLMUSDT', 'CRVUSDT', 'VIRTUALUSDT', 'AI16ZUSDT', 'TIAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'SPXUSDT', 'ETCUSDT', 'LDOUSDT', 'BCHUSDT', 'INJUSDT', 'KASUSDT', 'ALGOUSDT', 'TRXUSDT', 'IPUSDT'
     ]
