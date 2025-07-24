@@ -5,7 +5,6 @@ from telegram import Bot
 import numpy as np
 from dotenv import load_dotenv
 import os
-from scipy.signal import find_peaks  # Divergence için ekle
 
 load_dotenv()
 
@@ -132,10 +131,8 @@ def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, len
     return val, bcolor, scolor
 
 def find_rsi_divergence(closes, indicator, is_bullish=True):
-    prominence = 0.005 * np.std(closes)
     if is_bullish:
-        peaks, _ = find_peaks(-closes, distance=3, prominence=prominence)
-        lows_idx = peaks
+        lows_idx = np.where((closes[1:-1] < closes[:-2]) & (closes[1:-1] < closes[2:]))[0] + 1
         if len(lows_idx) < 2:
             return False
         last_low_idx = lows_idx[-1]
@@ -143,8 +140,7 @@ def find_rsi_divergence(closes, indicator, is_bullish=True):
         if closes[last_low_idx] < closes[prev_low_idx] and indicator[last_low_idx] > indicator[prev_low_idx]:
             return True
     else:
-        peaks, _ = find_peaks(closes, distance=3, prominence=prominence)
-        highs_idx = peaks
+        highs_idx = np.where((closes[1:-1] > closes[:-2]) & (closes[1:-1] > closes[2:]))[0] + 1
         if len(highs_idx) < 2:
             return False
         last_high_idx = highs_idx[-1]
@@ -210,34 +206,42 @@ async def check_signals(symbol, timeframe):
         td_support = calculate_trp_support(closes, lows)
         atr = calculate_atr(highs, lows, closes)
 
-        last_rsi = rsi_ema[-1] if len(rsi_ema) > 0 else 0
-        prev_rsi = rsi_ema[-2] if len(rsi_ema) > 1 else 0
+        # Hacim filter ekle
+        avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else 0
+        current_volume = volumes[-1]
+        high_volume = current_volume > 1.5 * avg_volume
+
+        bullish_div = find_rsi_divergence(closes, rsi_ema, is_bullish=True)
+        bearish_div = find_rsi_divergence(closes, rsi_ema, is_bullish=False)
+
+        current_high = highs[-1]
+        current_low = lows[-1]
         current_price = closes[-1]
 
         buy = False
         sell = False
         stop_loss = 0
         take_profit = 0
-        if last_rsi > 35 and prev_rsi < 35 and bcolor == 'maroon' and prev_bcolor == 'red' and current_price <= td_support:
+        if bullish_div and bcolor == 'maroon' and prev_bcolor == 'red' and td_support < float('inf') and current_low <= td_support and high_volume:
             buy = True
             stop_loss = current_price - 1.5 * atr
             take_profit = current_price + (current_price - stop_loss) * 2
-        elif last_rsi < 65 and prev_rsi > 65 and bcolor == 'green' and prev_bcolor == 'lime' and current_price >= td_resistance:
+        elif bearish_div and bcolor == 'green' and prev_bcolor == 'lime' and td_resistance > 0 and current_high >= td_resistance and high_volume:
             sell = True
             stop_loss = current_price + 1.5 * atr
             take_profit = current_price - (stop_loss - current_price) * 2
 
-        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, Prev RSI: {prev_rsi:.2f}, BColor: {bcolor}, Prev BColor: {prev_bcolor}, Resistance: {td_resistance:.2f}, Support: {td_support:.2f}, ATR: {atr:.2f}, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f}")
+        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, Bullish Div: {bullish_div}, Bearish Div: {bearish_div}, BColor: {bcolor}, Prev BColor: {prev_bcolor}, TD Resistance: {td_resistance:.2f}, TD Support: {td_support:.2f}, ATR: {atr:.2f}, High Volume: {high_volume}")
 
         key = f"{symbol}_{timeframe}"
         last_signal = signal_cache.get(key, (False, False))
 
         if (buy, sell) != last_signal:
             if buy:
-                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif RSI Uyumsuzluk, Squeeze Kırmızıdan Koyu Kırmızıya, Price <= TRP Support, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif RSI Uyumsuzluk, Squeeze Kırmızıdan Koyu Kırmızıya, Price <= TD Support, High Volume, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             elif sell:
-                message = f"{symbol} {timeframe}: SELL 📉 (Negatif RSI Uyumsuzluk, Squeeze Yeşilden Koyu Yeşile, Price >= TRP Resistance, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: SELL 📉 (Negatif RSI Uyumsuzluk, Squeeze Yeşilden Koyu Yeşile, Price >= TD Resistance, High Volume, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             signal_cache[key] = (buy, sell)
 
