@@ -158,7 +158,10 @@ def calculate_trp_resistance(closes, highs):
         else:
             count = 0
         if count >= 9:
-            resistance = np.max(highs[i-8:i+1])
+            slice_highs = highs[i-8:i+1]
+            if len(slice_highs) == 0:
+                return 0
+            resistance = np.max(slice_highs)
             break
     return resistance
 
@@ -171,7 +174,10 @@ def calculate_trp_support(closes, lows):
         else:
             count = 0
         if count >= 9:
-            support = np.min(lows[i-8:i+1])
+            slice_lows = lows[i-8:i+1]
+            if len(slice_lows) == 0:
+                return float('inf')
+            support = np.min(slice_lows)
             break
     return support
 
@@ -197,6 +203,8 @@ async def check_signals(symbol, timeframe):
         highs = np.array([x[2] for x in ohlcv])
         lows = np.array([x[3] for x in ohlcv])
         volumes = np.array([x[5] for x in ohlcv])
+        if len(closes) < 20:  # Veri kısa ise skip
+            return
 
         rsi_ema = calculate_rsi_ema(closes)
         sqz_on, sqz_off, no_sqz = calculate_bb_kc(closes, highs, lows)
@@ -206,7 +214,7 @@ async def check_signals(symbol, timeframe):
         td_support = calculate_trp_support(closes, lows)
         atr = calculate_atr(highs, lows, closes)
 
-        # Hacim filter (düşürüldü 1.2x'e)
+        # Hacim filter
         avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else 0
         current_volume = volumes[-1]
         high_volume = current_volume > 1.2 * avg_volume
