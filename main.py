@@ -116,36 +116,36 @@ def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, len
     return val, bcolor, scolor
 
 def calculate_trp_resistance(closes, highs):
-    max_count = 0
-    resistance = 0
+    count = 0
+    start_idx = -1
     for i in range(4, len(closes)):
-        count = 0
-        for j in range(i, max(i-9, -1), -1):
-            if closes[j] > closes[j-4]:
-                count += 1
-            else:
-                break
-        if count > max_count:
-            max_count = count
-            if max_count >= 9:
-                resistance = np.max(highs[i-8:i+1])
-    return resistance
+        if closes[i] > closes[i-4]:
+            if count == 0:
+                start_idx = i - 3  # Count 1 at i-3
+            count += 1
+        else:
+            if count >= 9:
+                return np.max(highs[start_idx:i])
+            count = 0
+    if count >= 9:
+        return np.max(highs[start_idx:])
+    return 0
 
 def calculate_trp_support(closes, lows):
-    max_count = 0
-    support = float('inf')
+    count = 0
+    start_idx = -1
     for i in range(4, len(closes)):
-        count = 0
-        for j in range(i, max(i-9, -1), -1):
-            if closes[j] < closes[j-4]:
-                count += 1
-            else:
-                break
-        if count > max_count:
-            max_count = count
-            if max_count >= 9:
-                support = np.min(lows[i-8:i+1])
-    return support
+        if closes[i] < closes[i-4]:
+            if count == 0:
+                start_idx = i - 3
+            count += 1
+        else:
+            if count >= 9:
+                return np.min(lows[start_idx:i])
+            count = 0
+    if count >= 9:
+        return np.min(lows[start_idx:])
+    return float('inf')
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
@@ -202,10 +202,10 @@ async def check_signals(symbol, timeframe):
 
         if (buy, sell) != last_signal:
             if buy:
-                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif Uyumsuzluk, RSI: {last_rsi:.2f}, Squeeze Kırmızıdan Koyu Kırmızıya, Price <= TD Support, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif RSI Uyumsuzluk, Squeeze Kırmızıdan Koyu Kırmızıya, Price <= TD Support, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             elif sell:
-                message = f"{symbol} {timeframe}: SELL 📉 (Negatif Uyumsuzluk, RSI: {last_rsi:.2f}, Squeeze Yeşilden Koyu Yeşile, Price >= TD Resistance, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
+                message = f"{symbol} {timeframe}: SELL 📉 (Negatif RSI Uyumsuzluk, Squeeze Yeşilden Koyu Yeşile, Price >= TD Resistance, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             signal_cache[key] = (buy, sell)
 
