@@ -44,6 +44,21 @@ def calculate_rsi(closes, period=14):
 
     return rsi
 
+def calculate_ema(series, period=14):
+    if len(series) < period:
+        return np.zeros(len(series))
+    ema = np.zeros_like(series)
+    ema[period-1] = np.mean(series[:period])
+    multiplier = 2 / (period + 1)
+    for i in range(period, len(series)):
+        ema[i] = (series[i] - ema[i-1]) * multiplier + ema[i-1]
+    return ema
+
+def calculate_rsi_ema(closes, rsi_length=14, ema_length=14):
+    rsi = calculate_rsi(closes, rsi_length)
+    rsi_ema = calculate_ema(rsi, ema_length)
+    return rsi_ema  # Artık divergence için bunu döndürüyoruz (senin PineScript gibi)
+
 def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20, mult_kc=1.5, use_tr=True):
     if len(closes) < max(length_bb, length_kc):
         return False, False, False
@@ -115,23 +130,23 @@ def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, len
 
     return val, bcolor, scolor
 
-def find_rsi_divergence(closes, rsi, is_bullish=True):
-    # Son iki low/high'ı bul (simple pivot detection)
-    if is_bullish:  # Bullish div: lower low price, higher low RSI, RSI <35
+def find_rsi_divergence(closes, indicator, is_bullish=True):
+    # Son iki dip/tepeyi bul (simple pivot detection), threshold'suz
+    if is_bullish:  # Pozitif: fiyat lower low, indikatör higher low
         lows_idx = np.where((closes[1:-1] < closes[:-2]) & (closes[1:-1] < closes[2:]))[0] + 1
         if len(lows_idx) < 2:
             return False
         last_low_idx = lows_idx[-1]
         prev_low_idx = lows_idx[-2]
-        if closes[last_low_idx] < closes[prev_low_idx] and rsi[last_low_idx] > rsi[prev_low_idx] and rsi[last_low_idx] < 35:
+        if closes[last_low_idx] < closes[prev_low_idx] and indicator[last_low_idx] > indicator[prev_low_idx]:
             return True
-    else:  # Bearish div: higher high price, lower high RSI, RSI >65
+    else:  # Negatif: fiyat higher high, indikatör lower high
         highs_idx = np.where((closes[1:-1] > closes[:-2]) & (closes[1:-1] > closes[2:]))[0] + 1
         if len(highs_idx) < 2:
             return False
         last_high_idx = highs_idx[-1]
         prev_high_idx = highs_idx[-2]
-        if closes[last_high_idx] > closes[prev_high_idx] and rsi[last_high_idx] < rsi[prev_high_idx] and rsi[last_high_idx] > 65:
+        if closes[last_high_idx] > closes[prev_high_idx] and indicator[last_high_idx] < indicator[prev_high_idx]:
             return True
     return False
 
@@ -184,7 +199,7 @@ async def check_signals(symbol, timeframe):
         lows = np.array([x[3] for x in ohlcv])
         volumes = np.array([x[5] for x in ohlcv])
 
-        rsi = calculate_rsi(closes, 14)
+        rsi_ema = calculate_rsi_ema(closes)  # Yeni EMA'lı RSI (senin PineScript gibi)
         sqz_on, sqz_off, no_sqz = calculate_bb_kc(closes, highs, lows)
         val, bcolor, scolor = calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz)
         prev_val, prev_bcolor, prev_scolor = calculate_squeeze_momentum(closes[:-1], highs[:-1], lows[:-1], sqz_on, sqz_off, no_sqz) if len(closes) > 1 else (0, 'gray', 'gray')
@@ -192,8 +207,8 @@ async def check_signals(symbol, timeframe):
         td_support = calculate_trp_support(closes, lows)
         atr = calculate_atr(highs, lows, closes)
 
-        bullish_div = find_rsi_divergence(closes, rsi, is_bullish=True)
-        bearish_div = find_rsi_divergence(closes, rsi, is_bullish=False)
+        bullish_div = find_rsi_divergence(closes, rsi_ema, is_bullish=True)
+        bearish_div = find_rsi_divergence(closes, rsi_ema, is_bullish=False)
 
         current_high = highs[-1]
         current_low = lows[-1]
