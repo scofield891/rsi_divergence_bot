@@ -2,3 +2,4 @@ ccxt
 python-telegram-bot
 numpy
 python-dotenv
+scipy
