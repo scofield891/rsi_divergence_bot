@@ -115,10 +115,30 @@ def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, len
 
     return val, bcolor, scolor
 
+def find_rsi_divergence(closes, rsi, is_bullish=True):
+    # Son iki low/high'ı bul (simple pivot detection)
+    if is_bullish:  # Bullish div: lower low price, higher low RSI, RSI <35
+        lows_idx = np.where((closes[1:-1] < closes[:-2]) & (closes[1:-1] < closes[2:]))[0] + 1
+        if len(lows_idx) < 2:
+            return False
+        last_low_idx = lows_idx[-1]
+        prev_low_idx = lows_idx[-2]
+        if closes[last_low_idx] < closes[prev_low_idx] and rsi[last_low_idx] > rsi[prev_low_idx] and rsi[last_low_idx] < 35:
+            return True
+    else:  # Bearish div: higher high price, lower high RSI, RSI >65
+        highs_idx = np.where((closes[1:-1] > closes[:-2]) & (closes[1:-1] > closes[2:]))[0] + 1
+        if len(highs_idx) < 2:
+            return False
+        last_high_idx = highs_idx[-1]
+        prev_high_idx = highs_idx[-2]
+        if closes[last_high_idx] > closes[prev_high_idx] and rsi[last_high_idx] < rsi[prev_high_idx] and rsi[last_high_idx] > 65:
+            return True
+    return False
+
 def calculate_trp_resistance(closes, highs):
     count = 0
     resistance = 0
-    for i in range(len(closes)-1, 3, -1):  # Reverse to find latest
+    for i in range(len(closes)-1, 3, -1):  # Latest TD9 search
         if closes[i] > closes[i-4]:
             count += 1
         else:
@@ -153,7 +173,7 @@ def calculate_atr(highs, lows, closes, period=14):
 
 async def check_signals(symbol, timeframe):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=50)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=100)  # Daha fazla bar için artırdım
         if not ohlcv or len(ohlcv) < 50:
             message = f"Uyarı ({symbol} {timeframe}): Yetersiz veri, ohlcv uzunluğu: {len(ohlcv)}"
             print(message)
@@ -172,26 +192,27 @@ async def check_signals(symbol, timeframe):
         td_support = calculate_trp_support(closes, lows)
         atr = calculate_atr(highs, lows, closes)
 
-        last_rsi = rsi[-1] if len(rsi) > 0 else 0
-        prev_rsi = rsi[-2] if len(rsi) > 1 else 0
-        current_price = closes[-1]
+        bullish_div = find_rsi_divergence(closes, rsi, is_bullish=True)
+        bearish_div = find_rsi_divergence(closes, rsi, is_bullish=False)
+
         current_high = highs[-1]
         current_low = lows[-1]
+        current_price = closes[-1]
 
         buy = False
         sell = False
         stop_loss = 0
         take_profit = 0
-        if last_rsi > 35 and prev_rsi < 35 and bcolor == 'maroon' and prev_bcolor == 'red' and td_support > 0 and current_low <= td_support:
+        if bullish_div and bcolor == 'maroon' and prev_bcolor == 'red' and td_support < float('inf') and current_low <= td_support:
             buy = True
             stop_loss = current_price - 1.5 * atr
             take_profit = current_price + (current_price - stop_loss) * 2
-        elif last_rsi < 65 and prev_rsi > 65 and bcolor == 'green' and prev_bcolor == 'lime' and td_resistance > 0 and current_high >= td_resistance:
+        elif bearish_div and bcolor == 'green' and prev_bcolor == 'lime' and td_resistance > 0 and current_high >= td_resistance:
             sell = True
             stop_loss = current_price + 1.5 * atr
             take_profit = current_price - (stop_loss - current_price) * 2
 
-        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, RSI: {last_rsi:.2f}, Prev RSI: {prev_rsi:.2f}, BColor: {bcolor}, Prev BColor: {prev_bcolor}, TD Resistance: {td_resistance:.2f}, TD Support: {td_support:.2f}, ATR: {atr:.2f}, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f}")
+        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, Bullish Div: {bullish_div}, Bearish Div: {bearish_div}, BColor: {bcolor}, Prev BColor: {prev_bcolor}, TD Resistance: {td_resistance:.2f}, TD Support: {td_support:.2f}, ATR: {atr:.2f}, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f}")
 
         key = f"{symbol}_{timeframe}"
         last_signal = signal_cache.get(key, (False, False))
@@ -210,7 +231,7 @@ async def check_signals(symbol, timeframe):
 
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Deneme Botu başladı, saat: " + time.strftime('%H:%M:%S'))
-    timeframes = ['1h', '2h', '4h']  # 2h eklendi
+    timeframes = ['1h', '2h', '4h']
     symbols = [
         'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'ADAUSDT', 'SUIUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', '1000BONKUSDT', 'HYPEUSDT', 'AVAXUSDT', 'MOODENGUSDT', 'LINKUSDT', 'PUMPFUNUSDT', 'LTCUSDT', 'TRUMPUSDT', 'AAVEUSDT', 'ARBUSDT', 'NEARUSDT', 'ONDOUSDT', 'POPCATUSDT', 'TONUSDT', 'OPUSDT', '1000FLOKIUSDT', 'SEIUSDT', 'HBARUSDT', 'WLDUSDT', 'BNBUSDT', 'UNIUSDT', 'XLMUSDT', 'CRVUSDT', 'VIRTUALUSDT', 'AI16ZUSDT', 'TIAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'SPXUSDT', 'ETCUSDT', 'LDOUSDT', 'BCHUSDT', 'INJUSDT', 'KASUSDT', 'ALGOUSDT', 'TRXUSDT', 'IPUSDT'
     ]
