@@ -115,37 +115,27 @@ def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, len
 
     return val, bcolor, scolor
 
-def calculate_trp_resistance(closes, highs):
+def calculate_td_seq_sell(closes):
     count = 0
-    start_idx = -1
     for i in range(4, len(closes)):
         if closes[i] > closes[i-4]:
-            if count == 0:
-                start_idx = i - 3  # Count 1 at i-3
             count += 1
         else:
-            if count >= 9:
-                return np.max(highs[start_idx:i])
             count = 0
-    if count >= 9:
-        return np.max(highs[start_idx:])
-    return 0
+        if count >= 9:
+            return True
+    return False
 
-def calculate_trp_support(closes, lows):
+def calculate_td_seq_buy(closes):
     count = 0
-    start_idx = -1
     for i in range(4, len(closes)):
         if closes[i] < closes[i-4]:
-            if count == 0:
-                start_idx = i - 3
             count += 1
         else:
-            if count >= 9:
-                return np.min(lows[start_idx:i])
             count = 0
-    if count >= 9:
-        return np.min(lows[start_idx:])
-    return float('inf')
+        if count >= 9:
+            return True
+    return False
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
@@ -179,7 +169,7 @@ async def check_signals(symbol, timeframe):
         atr = calculate_atr(highs, lows, closes)
 
         last_rsi = rsi[-1] if len(rsi) > 0 else 0
-        prev_rsi = rsi[-2] if len(rsi) > 1 else 0
+        prev_rsi = rsi[-2] if len(rsi) > 0 else 0
         current_price = closes[-1]
 
         buy = False
