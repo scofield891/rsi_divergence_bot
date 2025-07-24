@@ -115,7 +115,7 @@ def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, len
 
     return val, bcolor, scolor
 
-def calculate_td_seq_sell(closes):
+def calculate_trp_resistance(closes, highs):
     count = 0
     for i in range(4, len(closes)):
         if closes[i] > closes[i-4]:
@@ -123,10 +123,10 @@ def calculate_td_seq_sell(closes):
         else:
             count = 0
         if count >= 9:
-            return True
-    return False
+            return np.max(highs[i-8:i+1])
+    return 0
 
-def calculate_td_seq_buy(closes):
+def calculate_trp_support(closes, lows):
     count = 0
     for i in range(4, len(closes)):
         if closes[i] < closes[i-4]:
@@ -134,8 +134,8 @@ def calculate_td_seq_buy(closes):
         else:
             count = 0
         if count >= 9:
-            return True
-    return False
+            return np.min(lows[i-8:i+1])
+    return float('inf')
 
 def calculate_atr(highs, lows, closes, period=14):
     if len(closes) < period + 1:
@@ -163,13 +163,13 @@ async def check_signals(symbol, timeframe):
         rsi = calculate_rsi(closes, 14)
         sqz_on, sqz_off, no_sqz = calculate_bb_kc(closes, highs, lows)
         val, bcolor, scolor = calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz)
-        prev_val, prev_bcolor, prev_scolor = calculate_squeeze_momentum(closes[:-1], highs[:-1], lows[:-1], sqz_on, sqz_off, no_sqz) if len(closes) > 1 else (0, 'gray', 'gray')
+        prev_val, prev_bcolor, scolor = calculate_squeeze_momentum(closes[:-1], highs[:-1], lows[:-1], sqz_on, sqz_off, no_sqz) if len(closes) > 1 else (0, 'gray', 'gray')
         td_resistance = calculate_trp_resistance(closes, highs)
         td_support = calculate_trp_support(closes, lows)
         atr = calculate_atr(highs, lows, closes)
 
         last_rsi = rsi[-1] if len(rsi) > 0 else 0
-        prev_rsi = rsi[-2] if len(rsi) > 0 else 0
+        prev_rsi = rsi[-2] if len(rsi) > 1 else 0
         current_price = closes[-1]
 
         buy = False
