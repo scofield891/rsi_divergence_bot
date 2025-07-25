@@ -143,10 +143,10 @@ def calculate_trp_resistance(closes, highs):
         else:
             count = 0
         if count >= 9:
-            slice_highs = highs[i-8:i+1]
-            if len(slice_highs) == 0:
+            setup_start = i - 8
+            if setup_start < 0:
                 return 0
-            resistance = np.max(slice_highs)
+            resistance = np.max(highs[setup_start:i+1])
             break
     return resistance
 
@@ -159,10 +159,10 @@ def calculate_trp_support(closes, lows):
         else:
             count = 0
         if count >= 9:
-            slice_lows = lows[i-8:i+1]
-            if len(slice_lows) == 0:
+            setup_start = i - 8
+            if setup_start < 0:
                 return float('inf')
-            support = np.min(slice_lows)
+            support = np.min(lows[setup_start:i+1])
             break
     return support
 
@@ -241,7 +241,7 @@ async def check_signals(symbol, timeframe):
 
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Deneme Botu başladı, saat: " + time.strftime('%H:%M:%S'))
-    timeframes = ['15m', '30m', '1h', '2h', '4h']  # 15m eklendi
+    timeframes = ['30m', '1h', '2h', '4h']
     symbols = [
         'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'ADAUSDT', 'SUIUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', '1000BONKUSDT', 'HYPEUSDT', 'AVAXUSDT', 'MOODENGUSDT', 'LINKUSDT', 'PUMPFUNUSDT', 'LTCUSDT', 'TRUMPUSDT', 'AAVEUSDT', 'ARBUSDT', 'NEARUSDT', 'ONDOUSDT', 'POPCATUSDT', 'TONUSDT', 'OPUSDT', '1000FLOKIUSDT', 'SEIUSDT', 'HBARUSDT', 'WLDUSDT', 'BNBUSDT', 'UNIUSDT', 'XLMUSDT', 'CRVUSDT', 'VIRTUALUSDT', 'AI16ZUSDT', 'TIAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'SPXUSDT', 'ETCUSDT', 'LDOUSDT', 'BCHUSDT', 'INJUSDT', 'KASUSDT', 'ALGOUSDT', 'TRXUSDT', 'IPUSDT'
     ]
