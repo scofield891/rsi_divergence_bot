@@ -11,7 +11,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 
-exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}})
+# Exchange'i BingX olarak değiştiriyoruz, FX perpetual için 'swap' type
+exchange = ccxt.bingx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 telegram_bot = Bot(token=BOT_TOKEN)
 
@@ -44,215 +45,121 @@ def calculate_rsi(closes, period=14):
 
     return rsi
 
-def calculate_bb_kc(closes, highs, lows, length_bb=20, mult_bb=2.0, length_kc=20, mult_kc=1.5, use_tr=True):
-    if len(closes) < max(length_bb, length_kc):
-        return False, False, False
+def calculate_rsi_ema(rsi, ema_length=14):
+    ema = np.zeros_like(rsi)
+    if len(rsi) < ema_length:
+        return ema
+    ema[ema_length-1] = np.mean(rsi[:ema_length])
+    for i in range(ema_length, len(rsi)):
+        ema[i] = (rsi[i] * (2 / (ema_length + 1))) + (ema[i-1] * (1 - (2 / (ema_length + 1))))
+    return ema
 
-    basis = np.mean(closes[-length_bb:])
-    dev = mult_bb * np.std(closes[-length_bb:])
-    upper_bb = basis + dev
-    lower_bb = basis - dev
+def find_local_extrema(arr, order=3):
+    highs = []
+    lows = []
+    for i in range(order, len(arr) - order):
+        if arr[i] == max(arr[i-order:i+order+1]):
+            highs.append(i)
+        if arr[i] == min(arr[i-order:i+order+1]):
+            lows.append(i)
+    return np.array(highs), np.array(lows)
 
-    ma = np.mean(closes[-length_kc:])
-
-    if use_tr:
-        prev_closes = np.roll(closes, 1)
-        range_val = np.maximum(highs - lows, np.maximum(np.abs(highs - prev_closes), np.abs(lows - prev_closes)))
-    else:
-        range_val = highs - lows
-    rangema = np.mean(range_val[-length_kc:])
-    upper_kc = ma + rangema * mult_kc
-    lower_kc = ma - rangema * mult_kc
-
-    sqz_on = (lower_bb > lower_kc) and (upper_bb < upper_kc)
-    sqz_off = (lower_bb < lower_kc) and (upper_bb > upper_kc)
-    no_sqz = not sqz_on and not sqz_off
-
-    return sqz_on, sqz_off, no_sqz
-
-def calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz, length_kc=20):
-    if len(closes) < length_kc * 2 - 1:
-        return 0, 'gray', 'gray'
-
-    value = np.zeros(len(closes))
-    for i in range(length_kc - 1, len(closes)):
-        slice_closes = closes[i - length_kc + 1: i + 1]
-        slice_highs = highs[i - length_kc + 1: i + 1]
-        slice_lows = lows[i - length_kc + 1: i + 1]
-        m_avg_i = np.mean(slice_closes)
-        highest_i = np.max(slice_highs)
-        lowest_i = np.min(slice_lows)
-        m1_i = (highest_i + lowest_i) / 2
-        value[i] = slice_closes[-1] - (m1_i + m_avg_i) / 2
-
-    min_idx = len(closes) - length_kc
-    if min_idx < length_kc - 1:
-        return 0, 'gray', 'gray'
-    value_window = value[min_idx:]
-    x = np.arange(len(value_window))
-    fit = np.polyfit(x, value_window, 1)
-    val = fit[0] * (len(value_window) - 1) + fit[1]
-
-    prev_min_idx = len(closes) - length_kc - 1
-    if prev_min_idx >= length_kc - 1:
-        prev_value_window = value[prev_min_idx: prev_min_idx + length_kc]
-        prev_x = np.arange(len(prev_value_window))
-        prev_fit = np.polyfit(prev_x, prev_value_window, 1)
-        prev_val = prev_fit[0] * (len(prev_value_window) - 1) + prev_fit[1]
-    else:
-        prev_val = val
-
-    if val > 0 and val > prev_val:
-        bcolor = 'lime'
-    elif val > 0:
-        bcolor = 'green'
-    elif val < 0 and val < prev_val:
-        bcolor = 'red'
-    else:
-        bcolor = 'maroon'
-
-    scolor = 'blue' if no_sqz else 'black' if sqz_on else 'gray'
-
-    return val, bcolor, scolor
-
-def find_rsi_divergence(closes, rsi, is_bullish=True):
-    if is_bullish:
-        lows_idx = np.where((closes[1:-1] < closes[:-2]) & (closes[1:-1] < closes[2:]))[0] + 1
-        if len(lows_idx) < 2:
-            return False
-        last_low_idx = lows_idx[-1]
-        prev_low_idx = lows_idx[-2]
-        if closes[last_low_idx] < closes[prev_low_idx] and rsi[last_low_idx] > rsi[prev_low_idx]:
-            return True
-    else:
-        highs_idx = np.where((closes[1:-1] > closes[:-2]) & (closes[1:-1] > closes[2:]))[0] + 1
-        if len(highs_idx) < 2:
-            return False
-        last_high_idx = highs_idx[-1]
-        prev_high_idx = highs_idx[-2]
-        if closes[last_high_idx] > closes[prev_high_idx] and rsi[last_high_idx] < rsi[prev_high_idx]:
-            return True
-    return False
-
-def calculate_trp_resistance(closes, highs):
-    count = 0
-    resistance = 0
-    for i in range(len(closes)-1, 3, -1):
-        if closes[i] > closes[i-4]:
-            count += 1
-        else:
-            count = 0
-        if count >= 9:
-            setup_start = i - 8
-            if setup_start < 0:
-                return 0
-            resistance = np.max(highs[setup_start:i+1])
-            break
-    return resistance
-
-def calculate_trp_support(closes, lows):
-    count = 0
-    support = float('inf')
-    for i in range(len(closes)-1, 3, -1):
-        if closes[i] < closes[i-4]:
-            count += 1
-        else:
-            count = 0
-        if count >= 9:
-            setup_start = i - 8
-            if setup_start < 0:
-                return float('inf')
-            support = np.min(lows[setup_start:i+1])
-            break
-    return support
-
-def calculate_atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1:
-        return 0
-    tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
-    atr = np.zeros(len(closes))
-    atr[period] = np.mean(tr[:period])
-    for i in range(period + 1, len(closes)):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i-1]) / period
-    return atr[-1]
-
-async def check_signals(symbol, timeframe):
+async def check_divergence(symbol, timeframe):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=200)
-        if not ohlcv or len(ohlcv) < 50:
-            message = f"Uyarı ({symbol} {timeframe}): Yetersiz veri, ohlcv uzunluğu: {len(ohlcv)}"
-            print(message)
-            await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
-            return
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=100)
         closes = np.array([x[4] for x in ohlcv])
-        highs = np.array([x[2] for x in ohlcv])
-        lows = np.array([x[3] for x in ohlcv])
-        volumes = np.array([x[5] for x in ohlcv])
+        rsi = calculate_rsi(closes, 14)
+        rsi_ema = calculate_rsi_ema(rsi, 14)
+        rsi_ema2 = np.roll(rsi_ema, 2)
 
-        rsi = calculate_rsi(closes)
-        sqz_on, sqz_off, no_sqz = calculate_bb_kc(closes, highs, lows)
-        val, bcolor, scolor = calculate_squeeze_momentum(closes, highs, lows, sqz_on, sqz_off, no_sqz)
-        prev_val, prev_bcolor, prev_scolor = calculate_squeeze_momentum(closes[:-1], highs[:-1], lows[:-1], sqz_on, sqz_off, no_sqz) if len(closes) > 1 else (0, 'gray', 'gray')
-        td_resistance = calculate_trp_resistance(closes, highs)
-        td_support = calculate_trp_support(closes, lows)
-        atr = calculate_atr(highs, lows, closes)
+        ema_color = 'lime' if rsi_ema[-1] > rsi_ema2[-1] else 'red'
 
-        # Hacim filter
-        avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else 0
-        current_volume = volumes[-1]
-        high_volume = current_volume > 1.2 * avg_volume
+        min_lookback = 10
+        max_lookback = 40
+        lookback = min(max_lookback, len(closes))
+        if lookback < min_lookback:
+            return
 
-        bullish_div = find_rsi_divergence(closes, rsi, is_bullish=True)
-        bearish_div = find_rsi_divergence(closes, rsi, is_bullish=False)
+        price_slice = closes[-lookback:]
+        ema_slice = rsi_ema[-lookback:]
 
-        current_high = highs[-1]
-        current_low = lows[-1]
-        current_price = closes[-1]
+        price_highs, price_lows = find_local_extrema(price_slice, order=3)
+        ema_highs, ema_lows = find_local_extrema(ema_slice, order=3)
 
-        buy = False
-        sell = False
-        stop_loss = 0
-        take_profit = 0
-        if bullish_div and bcolor == 'maroon' and prev_bcolor == 'red' and td_support < float('inf') and current_low <= td_support and high_volume:
-            buy = True
-            stop_loss = current_price - 1.5 * atr
-            take_profit = current_price + (current_price - stop_loss) * 2
-        elif bearish_div and bcolor == 'green' and prev_bcolor == 'lime' and td_resistance > 0 and current_high >= td_resistance and high_volume:
-            sell = True
-            stop_loss = current_price + 1.5 * atr
-            take_profit = current_price - (stop_loss - current_price) * 2
+        bullish = False  # Pozitif: Fiyat LL yaparken EMA HL yaparsa
+        bearish = False  # Negatif: Fiyat HH yaparken EMA LH yaparsa
 
-        print(f"{symbol} {timeframe}: Buy: {buy}, Sell: {sell}, Bullish Div: {bullish_div}, Bearish Div: {bearish_div}, BColor: {bcolor}, Prev BColor: {prev_bcolor}, TD Resistance: {td_resistance:.2f}, TD Support: {td_support:.2f}, ATR: {atr:.2f}, High Volume: {high_volume}")
+        # Bullish - en az 2 dip, >=3 ise trend kontrol (daha fazla sinyal)
+        if len(price_lows) >= 2 and len(ema_lows) >= 2:
+            last_low = price_lows[-1]
+            prev_low = price_lows[-2]
+            last_ema_low = ema_lows[-1]
+            prev_ema_low = ema_lows[-2]
+            core_bullish = price_slice[last_low] < price_slice[prev_low] and ema_slice[last_ema_low] > ema_slice[prev_ema_low]
+            if len(price_lows) >= 3 and len(ema_lows) >= 3:
+                prev_prev_low = price_lows[-3]
+                if price_slice[prev_low] < price_slice[prev_prev_low]:
+                    bullish = core_bullish
+                else:
+                    bullish = core_bullish  # Zorunlu değil
+            else:
+                bullish = core_bullish
 
-        key = f"{symbol}_{timeframe}"
+        # Bearish - en az 2 tepe, >=3 ise trend kontrol (daha fazla sinyal)
+        if len(price_highs) >= 2 and len(ema_highs) >= 2:
+            last_high = price_highs[-1]
+            prev_high = price_highs[-2]
+            last_ema_high = ema_highs[-1]
+            prev_ema_high = ema_highs[-2]
+            core_bearish = price_slice[last_high] > price_slice[prev_high] and ema_slice[last_ema_high] < ema_slice[prev_ema_high]
+            if len(price_highs) >= 3 and len(ema_highs) >= 3:
+                prev_prev_high = price_highs[-3]
+                if price_slice[prev_high] > price_slice[prev_prev_high]:
+                    bearish = core_bearish
+                else:
+                    bearish = core_bearish  # Zorunlu değil
+            else:
+                bearish = core_bearish
+
+        print(f"{symbol} {timeframe}: Pozitif: {bullish}, Negatif: {bearish}, RSI_EMA: {rsi_ema[-1]:.2f}, Color: {ema_color}")
+
+        key = f"{symbol} {timeframe}"
         last_signal = signal_cache.get(key, (False, False))
 
-        if (buy, sell) != last_signal:
-            if buy:
-                message = f"{symbol} {timeframe}: BUY 🚀 (Pozitif RSI Uyumsuzluk, Squeeze Kırmızıdan Koyu Kırmızıya, Price <= TD Support, High Volume, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
-                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
-            elif sell:
-                message = f"{symbol} {timeframe}: SELL 📉 (Negatif RSI Uyumsuzluk, Squeeze Yeşilden Koyu Yeşile, Price >= TD Resistance, High Volume, Stop-Loss: {stop_loss:.2f}, Take-Profit: {take_profit:.2f})"
-                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
-            signal_cache[key] = (buy, sell)
+        if (bullish, bearish) != last_signal and (rsi_ema[-1] < 35 or rsi_ema[-1] > 65):
+            rsi_str = f"{rsi_ema[-1]:.2f}".replace('.', '\\.')
+            if bullish:
+                message = rf"\*{symbol} {timeframe}\*: \nPozitif Uyumsuzluk: {bullish} 🚀 \(Price LL, EMA HL\)\nRSI_EMA: {rsi_str} \({ema_color.upper()}\)"
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='MarkdownV2')
+            if bearish:
+                message = rf"\*{symbol} {timeframe}\*: \nNegatif Uyumsuzluk: {bearish} 📉 \(Price HH, EMA LH\)\nRSI_EMA: {rsi_str} \({ema_color.upper()}\)"
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='MarkdownV2')
+            signal_cache[key] = (bullish, bearish)
 
     except Exception as e:
         print(f"Hata ({symbol} {timeframe}): {str(e)}")
 
 async def main():
-    await telegram_bot.send_message(chat_id=CHAT_ID, text="Deneme Botu başladı, saat: " + time.strftime('%H:%M:%S'))
-    timeframes = ['30m', '1h', '2h', '4h']
+    await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + time.strftime('%H:%M:%S'))
+    timeframes = ['5m', '15m']
+    # BingX'te mevcut FX perpetual çiftleri (USDT settled)
     symbols = [
-        'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'ADAUSDT', 'SUIUSDT', 'WIFUSDT', 'ENAUSDT', 'PENGUUSDT', '1000BONKUSDT', 'HYPEUSDT', 'AVAXUSDT', 'MOODENGUSDT', 'LINKUSDT', 'PUMPFUNUSDT', 'LTCUSDT', 'TRUMPUSDT', 'AAVEUSDT', 'ARBUSDT', 'NEARUSDT', 'ONDOUSDT', 'POPCATUSDT', 'TONUSDT', 'OPUSDT', '1000FLOKIUSDT', 'SEIUSDT', 'HBARUSDT', 'WLDUSDT', 'BNBUSDT', 'UNIUSDT', 'XLMUSDT', 'CRVUSDT', 'VIRTUALUSDT', 'AI16ZUSDT', 'TIAUSDT', 'TAOUSDT', 'APTUSDT', 'DOTUSDT', 'SPXUSDT', 'ETCUSDT', 'LDOUSDT', 'BCHUSDT', 'INJUSDT', 'KASUSDT', 'ALGOUSDT', 'TRXUSDT', 'IPUSDT'
-    ]
+        'EURUSD-USDT', 'GBPUSD-USDT', 'AUDUSD-USDT', 'NZDUSD-USDT', 'USDCAD-USDT', 'USDCHF-USDT', 'USDJPY-USDT',
+        'EURGBP-USDT', 'EURAUD-USDT', 'EURNZD-USDT', 'EURCAD-USDT', 'EURCHF-USDT', 'EURJPY-USDT',
+        'GBPAUD-USDT', 'GBPNZD-USDT', 'GBPCAD-USDT', 'GBPCHF-USDT', 'GBPJPY-USDT',
+        'AUDNZD-USDT', 'AUDCAD-USDT', 'AUDCHF-USDT', 'AUDJPY-USDT',
+        'NZDCAD-USDT', 'NZDCHF-USDT', 'NZDJPY-USDT',
+        'CADCHF-USDT', 'CADJPY-USDT',
+        'CHFJPY-USDT'
+    ]  # BingX'te mevcut FX perpetuals, formatı test et (bazı çiftler AUDCAD-USDT gibi olabilir)
 
     while True:
         for timeframe in timeframes:
             for symbol in symbols:
-                await check_signals(symbol, timeframe)
-                await asyncio.sleep(1)  # Rate limit
-        print("Tüm taramalar tamamlandı, 5 dakika bekleniyor...")
-        await asyncio.sleep(300)
+                await check_divergence(symbol, timeframe)
+                await asyncio.sleep(1)
+        print("Tüm taramalar tamamlandı, 2 dakika bekleniyor...")
+        await asyncio.sleep(120)  # 2 dakika bekleme
 
 if __name__ == "__main__":
     asyncio.run(main())
