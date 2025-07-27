@@ -11,8 +11,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 
-# Exchange'i BingX olarak değiştiriyoruz, FX perpetual için 'swap' type
-exchange = ccxt.bingx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+# Exchange'i BingX olarak, Standard Futures için 'future' type (Forex burada)
+exchange = ccxt.bingx({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
 
 telegram_bot = Bot(token=BOT_TOKEN)
 
@@ -142,16 +142,16 @@ async def check_divergence(symbol, timeframe):
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + time.strftime('%H:%M:%S'))
     timeframes = ['5m', '15m']
-    # BingX'te mevcut FX perpetual çiftleri (USDT settled)
+    # BingX Standard Futures'ta mevcut FX çiftleri (format -USDT olmadan)
     symbols = [
-        'EURUSD-USDT', 'GBPUSD-USDT', 'AUDUSD-USDT', 'NZDUSD-USDT', 'USDCAD-USDT', 'USDCHF-USDT', 'USDJPY-USDT',
-        'EURGBP-USDT', 'EURAUD-USDT', 'EURNZD-USDT', 'EURCAD-USDT', 'EURCHF-USDT', 'EURJPY-USDT',
-        'GBPAUD-USDT', 'GBPNZD-USDT', 'GBPCAD-USDT', 'GBPCHF-USDT', 'GBPJPY-USDT',
-        'AUDNZD-USDT', 'AUDCAD-USDT', 'AUDCHF-USDT', 'AUDJPY-USDT',
-        'NZDCAD-USDT', 'NZDCHF-USDT', 'NZDJPY-USDT',
-        'CADCHF-USDT', 'CADJPY-USDT',
-        'CHFJPY-USDT'
-    ]  # BingX'te mevcut FX perpetuals, formatı test et (bazı çiftler AUDCAD-USDT gibi olabilir)
+        'EURUSD', 'GBPUSD', 'AUDUSD', 'NZDUSD', 'USDCAD', 'USDCHF', 'USDJPY',
+        'EURGBP', 'EURAUD', 'EURNZD', 'EURCAD', 'EURCHF', 'EURJPY',
+        'GBPAUD', 'GBPNZD', 'GBPCAD', 'GBPCHF', 'GBPJPY',
+        'AUDNZD', 'AUDCAD', 'AUDCHF', 'AUDJPY',
+        'NZDCAD', 'NZDCHF', 'NZDJPY',
+        'CADCHF', 'CADJPY',
+        'CHFJPY'
+    ]  # BingX'te desteklenen majör FX çiftleri
 
     while True:
         for timeframe in timeframes:
