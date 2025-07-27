@@ -11,7 +11,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 
-# Exchange'i Kraken olarak değiştiriyoruz, FX spot için default spot
+# Exchange'i Kraken olarak, FX spot için
 exchange = ccxt.kraken({'enableRateLimit': True})
 
 telegram_bot = Bot(token=BOT_TOKEN)
@@ -70,88 +70,81 @@ async def check_divergence(symbol, timeframe):
         closes = np.array([x[4] for x in ohlcv])
         rsi = calculate_rsi(closes, 14)
         rsi_ema = calculate_rsi_ema(rsi, 14)
-        rsi_ema2 = np.roll(rsi_ema, 2)
+        rsi_ema2 = np.roll(rsi_ema, 1)
 
         ema_color = 'lime' if rsi_ema[-1] > rsi_ema2[-1] else 'red'
 
-        min_lookback = 10
-        max_lookback = 40
-        lookback = min(max_lookback, len(closes))
-        if lookback < min_lookback:
+        lookback = 30  # Sabit 30 bar
+        if len(closes) < lookback:
             return
 
         price_slice = closes[-lookback:]
         ema_slice = rsi_ema[-lookback:]
 
         price_highs, price_lows = find_local_extrema(price_slice, order=3)
-        ema_highs, ema_lows = find_local_extrema(ema_slice, order=3)
 
-        bullish = False  # Pozitif: Fiyat LL yaparken EMA HL yaparsa
-        bearish = False  # Negatif: Fiyat HH yaparken EMA LH yaparsa
+        bullish = False
+        bearish = False
 
-        # Bullish - en az 2 dip, >=3 ise trend kontrol (daha fazla sinyal)
-        if len(price_lows) >= 2 and len(ema_lows) >= 2:
-            last_low = price_lows[-1]
-            prev_low = price_lows[-2]
-            last_ema_low = ema_lows[-1]
-            prev_ema_low = ema_lows[-2]
-            core_bullish = price_slice[last_low] < price_slice[prev_low] and ema_slice[last_ema_low] > ema_slice[prev_ema_low]
-            if len(price_lows) >= 3 and len(ema_lows) >= 3:
-                prev_prev_low = price_lows[-3]
-                if price_slice[prev_low] < price_slice[prev_prev_low]:
-                    bullish = core_bullish
-                else:
-                    bullish = core_bullish  # Zorunlu değil
-            else:
-                bullish = core_bullish
+        # Bullish: Price LL, EMA HL (price low idx'lerde, 30 bar içinde)
+        if len(price_lows) >= 2:
+            for i_idx in range(len(price_lows) - 1, 0, -1):
+                i = price_lows[i_idx]
+                for j_idx in range(i_idx - 1, -1, -1):
+                    j = price_lows[j_idx]
+                    if (i - j) <= lookback:
+                        if price_slice[i] < price_slice[j] and ema_slice[i] > ema_slice[j]:
+                            bullish = True
+                            break
+                if bullish:
+                    break
 
-        # Bearish - en az 2 tepe, >=3 ise trend kontrol (daha fazla sinyal)
-        if len(price_highs) >= 2 and len(ema_highs) >= 2:
-            last_high = price_highs[-1]
-            prev_high = price_highs[-2]
-            last_ema_high = ema_highs[-1]
-            prev_ema_high = ema_highs[-2]
-            core_bearish = price_slice[last_high] > price_slice[prev_high] and ema_slice[last_ema_high] < ema_slice[prev_ema_high]
-            if len(price_highs) >= 3 and len(ema_highs) >= 3:
-                prev_prev_high = price_highs[-3]
-                if price_slice[prev_high] > price_slice[prev_prev_high]:
-                    bearish = core_bearish
-                else:
-                    bearish = core_bearish  # Zorunlu değil
-            else:
-                bearish = core_bearish
+        # Bearish: Price HH, EMA LH (price high idx'lerde, 30 bar içinde)
+        if len(price_highs) >= 2:
+            for i_idx in range(len(price_highs) - 1, 0, -1):
+                i = price_highs[i_idx]
+                for j_idx in range(i_idx - 1, -1, -1):
+                    j = price_highs[j_idx]
+                    if (i - j) <= lookback:
+                        if price_slice[i] > price_slice[j] and ema_slice[i] < ema_slice[j]:
+                            bearish = True
+                            break
+                if bearish:
+                    break
 
         print(f"{symbol} {timeframe}: Pozitif: {bullish}, Negatif: {bearish}, RSI_EMA: {rsi_ema[-1]:.2f}, Color: {ema_color}")
 
         key = f"{symbol} {timeframe}"
         last_signal = signal_cache.get(key, (False, False))
 
-        if (bullish, bearish) != last_signal and (rsi_ema[-1] < 35 or rsi_ema[-1] > 65):
-            rsi_str = f"{rsi_ema[-1]:.2f}".replace('.', '\\.')
-            if bullish:
-                message = rf"\*{symbol} {timeframe}\*: \nPozitif Uyumsuzluk: {bullish} 🚀 \(Price LL, EMA HL\)\nRSI_EMA: {rsi_str} \({ema_color.upper()}\)"
-                await telegram_bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='MarkdownV2')
-            if bearish:
-                message = rf"\*{symbol} {timeframe}\*: \nNegatif Uyumsuzluk: {bearish} 📉 \(Price HH, EMA LH\)\nRSI_EMA: {rsi_str} \({ema_color.upper()}\)"
-                await telegram_bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='MarkdownV2')
-            signal_cache[key] = (bullish, bearish)
+        # Şartlar: Bullish <40, Bearish >60
+        if (bullish or bearish) and (bullish, bearish) != last_signal:
+            if (bullish and rsi_ema[-1] < 40) or (bearish and rsi_ema[-1] > 60):
+                rsi_str = f"{rsi_ema[-1]:.2f}"
+                if bullish:
+                    message = f"{symbol} {timeframe}\nPozitif Uyumsuzluk: {bullish} 🚀 (Price LL, EMA HL)\nRSI_EMA: {rsi_str} ({ema_color.upper()})"
+                    await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                if bearish:
+                    message = f"{symbol} {timeframe}\nNegatif Uyumsuzluk: {bearish} 📉 (Price HH, EMA LH)\nRSI_EMA: {rsi_str} ({ema_color.upper()})"
+                    await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                signal_cache[key] = (bullish, bearish)
 
     except Exception as e:
         print(f"Hata ({symbol} {timeframe}): {str(e)}")
 
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + time.strftime('%H:%M:%S'))
-    timeframes = ['5m', '15m']
-    # Kraken'de mevcut FX spot çiftleri
+    timeframes = ['5m', '15m', '30m', '1h']  # Ekli
+    # Pepperstone'da mevcut majör + minör FX pariteleri (egzotik dışarıda)
     symbols = [
-        'EUR/USD', 'GBP/USD', 'AUD/USD', 'NZD/USD', 'USD/CAD', 'USD/CHF', 'USD/JPY',
-        'EUR/GBP', 'EUR/AUD', 'EUR/NZD', 'EUR/CAD', 'EUR/CHF', 'EUR/JPY',
-        'GBP/AUD', 'GBP/NZD', 'GBP/CAD', 'GBP/CHF', 'GBP/JPY',
-        'AUD/NZD', 'AUD/CAD', 'AUD/CHF', 'AUD/JPY',
-        'NZD/CAD', 'NZD/CHF', 'NZD/JPY',
-        'CAD/CHF', 'CAD/JPY',
+        'EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'USD/CAD', 'AUD/USD', 'NZD/USD',  # Majörler
+        'EUR/GBP', 'EUR/JPY', 'EUR/AUD', 'EUR/NZD', 'EUR/CAD', 'EUR/CHF',  # Minörler
+        'GBP/JPY', 'GBP/AUD', 'GBP/NZD', 'GBP/CAD', 'GBP/CHF',
+        'AUD/JPY', 'AUD/NZD', 'AUD/CAD', 'AUD/CHF',
+        'NZD/JPY', 'NZD/CAD', 'NZD/CHF',
+        'CAD/JPY', 'CAD/CHF',
         'CHF/JPY'
-    ]  # Kraken desteklenen FX çiftleri
+    ]  # Majör + minör, toplam ~28, exotics dışarıda
 
     while True:
         for timeframe in timeframes:
