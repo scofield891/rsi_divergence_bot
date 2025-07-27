@@ -11,8 +11,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 
-# Exchange'i BingX olarak, Standard Futures için 'future' type (Forex burada)
-exchange = ccxt.bingx({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+# Exchange'i Kraken olarak değiştiriyoruz, FX spot için default spot
+exchange = ccxt.kraken({'enableRateLimit': True})
 
 telegram_bot = Bot(token=BOT_TOKEN)
 
@@ -142,16 +142,16 @@ async def check_divergence(symbol, timeframe):
 async def main():
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + time.strftime('%H:%M:%S'))
     timeframes = ['5m', '15m']
-    # BingX Standard Futures'ta mevcut FX çiftleri (format -USDT olmadan)
+    # Kraken'de mevcut FX spot çiftleri
     symbols = [
-        'EURUSD', 'GBPUSD', 'AUDUSD', 'NZDUSD', 'USDCAD', 'USDCHF', 'USDJPY',
-        'EURGBP', 'EURAUD', 'EURNZD', 'EURCAD', 'EURCHF', 'EURJPY',
-        'GBPAUD', 'GBPNZD', 'GBPCAD', 'GBPCHF', 'GBPJPY',
-        'AUDNZD', 'AUDCAD', 'AUDCHF', 'AUDJPY',
-        'NZDCAD', 'NZDCHF', 'NZDJPY',
-        'CADCHF', 'CADJPY',
-        'CHFJPY'
-    ]  # BingX'te desteklenen majör FX çiftleri
+        'EUR/USD', 'GBP/USD', 'AUD/USD', 'NZD/USD', 'USD/CAD', 'USD/CHF', 'USD/JPY',
+        'EUR/GBP', 'EUR/AUD', 'EUR/NZD', 'EUR/CAD', 'EUR/CHF', 'EUR/JPY',
+        'GBP/AUD', 'GBP/NZD', 'GBP/CAD', 'GBP/CHF', 'GBP/JPY',
+        'AUD/NZD', 'AUD/CAD', 'AUD/CHF', 'AUD/JPY',
+        'NZD/CAD', 'NZD/CHF', 'NZD/JPY',
+        'CAD/CHF', 'CAD/JPY',
+        'CHF/JPY'
+    ]  # Kraken desteklenen FX çiftleri
 
     while True:
         for timeframe in timeframes:
