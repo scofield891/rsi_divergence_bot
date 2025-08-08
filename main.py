@@ -159,7 +159,8 @@ async def check_signals(symbol, timeframe):
                             raise
                         await asyncio.sleep(10)
                     except Exception as e:
-                        raise
+                        logger.error(f"Hata ({symbol} {timeframe}): {str(e)}")
+                        return  # Hatalı sembolü atla, devam et
 
             df = calculate_indicators(df)
             last_row = df.iloc[-1]
@@ -190,9 +191,9 @@ async def check_signals(symbol, timeframe):
 
             if len(price_highs) >= 2:
                 last_high = price_highs[-1]
-                prev_high = price_highs[-2]
-                if (last_high - prev_high) >= min_distance:
-                    if price_slice[last_high] > price_slice[prev_high] and ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD):
+                prev_low = price_highs[-2]
+                if (last_high - prev_low) >= min_distance:
+                    if price_slice[last_high] > price_slice[prev_low] and ema_slice[last_high] < (ema_slice[prev_low] - EMA_THRESHOLD):
                         bearish = True
 
             buy_score = 0
@@ -313,20 +314,13 @@ async def main():
         'JTOUSDT', 'HYPERUSDT', 'ETHFIUSDT', 'BERAUSDT'
     ]
 
-    # Sembol doğrulama
+    # Sembol doğrulama (esnek)
     try:
         await exchange.load_markets()
-        valid_symbols = []
-        for s in symbols:
-            if s in exchange.markets:
-                valid_symbols.append(s)
-            else:
-                logger.warning(f"Pazarda yok: {s}")
-        symbols = valid_symbols
         logger.info(f"Doğrulanan sembol sayısı: {len(symbols)}")
     except Exception as e:
         logger.error(f"Pazar yükleme hatası: {str(e)}")
-        return
+        # Hata olsa bile tüm sembollerle devam et
 
     while True:
         tasks = []
