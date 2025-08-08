@@ -1,7 +1,6 @@
 import ccxt
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from telegram import Bot
 from dotenv import load_dotenv
 import os
@@ -34,19 +33,42 @@ exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'line
 telegram_bot = Bot(token=BOT_TOKEN)
 signal_cache = {}
 
+def calculate_bollinger_bands(closes, window=20, std=2):
+    rolling_mean = pd.Series(closes).rolling(window=window).mean().values
+    rolling_std = pd.Series(closes).rolling(window=window).std().values
+    upper_band = rolling_mean + (rolling_std * std)
+    lower_band = rolling_mean - (rolling_std * std)
+    return upper_band, rolling_mean, lower_band
+
+def calculate_ema(closes, span=3):
+    k = 2 / (span + 1)
+    ema = np.zeros_like(closes)
+    ema[0] = closes[0]
+    for i in range(1, len(closes)):
+        ema[i] = (closes[i] * k) + (ema[i-1] * (1 - k))
+    return ema
+
+def calculate_rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return np.zeros(len(closes))
+    deltas = np.diff(closes)
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    avg_gain = pd.Series(gains).rolling(window=period).mean().values
+    avg_loss = pd.Series(losses).rolling(window=period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate(([np.nan] * period, rsi[period-1:]))
+    return np.nan_to_num(rsi, nan=50.0)
+
 def calculate_indicators(df):
-    # Bollinger Bands (length=20, std=2)
-    bb = ta.bbands(df['close'], length=20, std=2)
-    df['bb_upper'] = bb[f'BBU_20_2.0']
-    df['bb_lower'] = bb[f'BBL_20_2.0']
-    df['bb_middle'] = bb[f'BBM_20_2.0']
-    
-    # 3-period EMA
-    df['ema3'] = ta.ema(df['close'], length=3)
-    
-    # RSI (length=14)
-    df['rsi'] = ta.rsi(df['close'], length=14)
-    
+    closes = df['close'].values
+    upper_band, middle_band, lower_band = calculate_bollinger_bands(closes)
+    df['bb_upper'] = upper_band
+    df['bb_lower'] = lower_band
+    df['bb_middle'] = middle_band
+    df['ema3'] = calculate_ema(closes, span=3)
+    df['rsi'] = calculate_rsi(closes, period=14)
     return df
 
 async def check_signals(symbol, timeframe):
