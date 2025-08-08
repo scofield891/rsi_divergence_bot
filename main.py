@@ -1,4 +1,4 @@
-import ccxt
+import ccxt.async_support as ccxt
 import numpy as np
 import pandas as pd
 from telegram import Bot
@@ -33,7 +33,7 @@ logger.addHandler(file_handler)
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
 
-exchange = ccxt.async_support.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}, 'timeout': 60000})
+exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}, 'timeout': 60000})
 telegram_bot = Bot(token=BOT_TOKEN)
 signal_cache = {}
 semaphore = asyncio.Semaphore(10)
@@ -315,10 +315,10 @@ async def main():
 
     # Sembol doğrulama
     try:
-        markets = await exchange.load_markets()
+        await exchange.load_markets()
         valid_symbols = []
         for s in symbols:
-            if s in markets:
+            if s in exchange.markets:
                 valid_symbols.append(s)
             else:
                 logger.warning(f"Pazarda yok: {s}")
