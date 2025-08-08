@@ -2,4 +2,5 @@ ccxt
 python-telegram-bot
 numpy
 python-dotenv
-scipy
+scipy  # Eğer kullanıyorsan, yoksa sil
+pytz  # Zaman zone için ekledim
