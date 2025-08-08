@@ -3,5 +3,6 @@ python-telegram-bot
 numpy
 python-dotenv
 pandas
-ta-lib
+pandas-ta
 pytz
+scipy

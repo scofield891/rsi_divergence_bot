@@ -1,8 +1,7 @@
 import ccxt
 import numpy as np
 import pandas as pd
-import ta.momentum as momentum
-import ta.volatility as volatility
+import pandas_ta as ta
 from telegram import Bot
 from dotenv import load_dotenv
 import os
@@ -36,13 +35,18 @@ telegram_bot = Bot(token=BOT_TOKEN)
 signal_cache = {}
 
 def calculate_indicators(df):
-    bb = volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_lower'] = bb.bollinger_lband()
-    df['bb_middle'] = bb.bollinger_mavg()
-    df['ema3'] = df['close'].ewm(span=3, adjust=False).mean()
-    rsi = momentum.RSIIndicator(close=df['close'], window=14)
-    df['rsi'] = rsi.rsi()
+    # Bollinger Bands (length=20, std=2)
+    bb = ta.bbands(df['close'], length=20, std=2)
+    df['bb_upper'] = bb[f'BBU_20_2.0']
+    df['bb_lower'] = bb[f'BBL_20_2.0']
+    df['bb_middle'] = bb[f'BBM_20_2.0']
+    
+    # 3-period EMA
+    df['ema3'] = ta.ema(df['close'], length=3)
+    
+    # RSI (length=14)
+    df['rsi'] = ta.rsi(df['close'], length=14)
+    
     return df
 
 async def check_signals(symbol, timeframe):
