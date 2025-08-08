@@ -2,5 +2,6 @@ ccxt
 python-telegram-bot
 numpy
 python-dotenv
-scipy  # Eğer kullanıyorsan, yoksa sil
-pytz  # Zaman zone için ekledim
+pandas
+ta-lib
+pytz
