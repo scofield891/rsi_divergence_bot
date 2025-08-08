@@ -13,6 +13,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 TEST_MODE = os.getenv('TEST_MODE', 'False').lower() == 'true'
+VOLUME_FILTER = os.getenv('VOLUME_FILTER', 'False').lower() == 'true'
+VOLUME_MULTIPLIER = float(os.getenv('VOLUME_MULTIPLIER', 1.2))
 
 # Logging setup
 logger = logging.getLogger()
@@ -61,6 +63,13 @@ def calculate_rsi(closes, period=14):
     rsi = np.concatenate(([np.nan] * period, rsi[period-1:]))
     return np.nan_to_num(rsi, nan=50.0)
 
+def volume_filter_check(volumes):
+    if len(volumes) < 20:
+        return True
+    avg_volume = np.mean(volumes[-20:])
+    current_volume = volumes[-1]
+    return current_volume > avg_volume * VOLUME_MULTIPLIER
+
 def calculate_indicators(df):
     closes = df['close'].values
     upper_band, middle_band, lower_band = calculate_bollinger_bands(closes)
@@ -74,7 +83,7 @@ def calculate_indicators(df):
 async def check_signals(symbol, timeframe):
     try:
         if TEST_MODE:
-            closes = np.cumsum(np.random.randn(100)) + 60000
+            closes = np.cumsum(np.random.randn(100)) * 0.05 + 0.3  # CRVUSDT için daha gerçekçi dummy (~0.3 USDT)
             volumes = np.random.rand(100) * 10000
             ohlcv = [[0, 0, 0, 0, closes[i], volumes[i]] for i in range(100)]
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -109,6 +118,9 @@ async def check_signals(symbol, timeframe):
                          last_row['rsi'] > 70
         
         if buy_condition and current_pos['signal'] != 'buy':
+            if VOLUME_FILTER and not volume_filter_check(df['volume'].values):
+                logger.info(f"{symbol} {timeframe}: Hacim düşük, sinyal filtrelandı")
+                return
             entry_price = last_row['close']
             tp_price = last_row['bb_upper']
             sl_price = last_row['bb_lower'] * 0.99
@@ -122,6 +134,9 @@ async def check_signals(symbol, timeframe):
             signal_cache[key] = {'signal': 'buy', 'entry_price': entry_price, 'tp_price': tp_price, 'sl_price': sl_price}
         
         elif sell_condition and current_pos['signal'] != 'sell':
+            if VOLUME_FILTER and not volume_filter_check(df['volume'].values):
+                logger.info(f"{symbol} {timeframe}: Hacim düşük, sinyal filtrelandı")
+                return
             entry_price = last_row['close']
             tp_price = last_row['bb_lower']
             sl_price = last_row['bb_upper'] * 1.01
