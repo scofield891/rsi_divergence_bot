@@ -167,7 +167,7 @@ async def check_signals(symbol, timeframe):
 
         macd, macd_signal = last_row['macd'], last_row['macd_signal']
         
-        lookback = 50
+        lookback = 30  # 50’den 30’a düşürüldü
         price_slice = df['close'].values[-lookback:]
         ema_slice = df['rsi_ema'].values[-lookback:]
         volume_slice = df['volume'].values[-lookback:]
