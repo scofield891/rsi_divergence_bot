@@ -44,6 +44,15 @@ def calculate_ema(closes, span):
         ema[i] = (closes[i] * k) + (ema[i-1] * (1 - k))
     return ema
 
+def calculate_sma(closes, period):
+    sma = np.zeros_like(closes)
+    for i in range(len(closes)):
+        if i < period - 1:
+            sma[i] = 0
+        else:
+            sma[i] = np.mean(closes[i-period+1:i+1])
+    return sma
+
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return np.zeros(len(closes))
@@ -95,9 +104,6 @@ def find_local_extrema(arr, order=4):
             lows.append(i)
     return np.array(highs), np.array(lows)
 
-def calculate_ema200(closes):
-    return calculate_ema(closes, span=200)
-
 def calculate_atr(df, period=14):
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
@@ -134,11 +140,10 @@ def volume_filter_check(volumes):
 
 def calculate_indicators(df):
     closes = df['close'].values
-    df['ema20'] = calculate_ema(closes, span=20)
-    df['ema50'] = calculate_ema(closes, span=50)
+    df['ema13'] = calculate_ema(closes, span=13)
+    df['sma34'] = calculate_sma(closes, period=34)
     df['rsi'] = calculate_rsi(closes)
     df['rsi_ema'] = calculate_rsi_ema(df['rsi'])
-    df['ema200'] = calculate_ema200(closes)
     df['atr'] = calculate_atr(df)
     df['obv'] = calculate_obv(df)
     macd, macd_signal = calculate_macd(closes)
@@ -180,7 +185,7 @@ async def check_signals(symbol, timeframe):
 
         macd, macd_signal = last_row['macd'], last_row['macd_signal']
         
-        lookback = 20
+        lookback = 30
         price_slice = df['close'].values[-lookback:]
         ema_slice = df['rsi_ema'].values[-lookback:]
         volume_slice = df['volume'].values[-lookback:]
@@ -214,8 +219,7 @@ async def check_signals(symbol, timeframe):
         if last_row['obv'] > prev_row['obv']:
             score += 10
 
-        buy_condition = (prev_row['ema20'] <= prev_row['ema50'] and last_row['ema20'] > last_row['ema50']) and \
-                        last_row['close'] > last_row['ema200'] and \
+        buy_condition = (prev_row['ema13'] <= prev_row['sma34'] and last_row['ema13'] > last_row['sma34']) and \
                         score >= 50
 
         score = 0
@@ -228,9 +232,12 @@ async def check_signals(symbol, timeframe):
         if last_row['obv'] < prev_row['obv']:
             score += 10
 
-        sell_condition = (prev_row['ema20'] >= prev_row['ema50'] and last_row['ema20'] < last_row['ema50']) and \
-                         last_row['close'] < last_row['ema200'] and \
+        sell_condition = (prev_row['ema13'] >= prev_row['sma34'] and last_row['ema13'] < last_row['sma34']) and \
                          score >= 50
+
+        if VOLUME_FILTER and not volume_filter_check(df['volume'].values):
+            logger.info(f"{symbol} {timeframe}: Hacim düşük")
+            return
 
         if buy_condition and current_pos['signal'] != 'buy':
             entry_price = last_row['close']
