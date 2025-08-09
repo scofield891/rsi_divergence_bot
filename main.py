@@ -13,7 +13,7 @@ import sys
 BOT_TOKEN = '7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY'
 CHAT_ID = '-1002755412514'
 TEST_MODE = False
-VOLUME_FILTER = True
+VOLUME_FILTER = False  # Hacim filtresi kaldırıldı
 VOLUME_MULTIPLIER = 1.2
 RSI_LOW = 40
 RSI_HIGH = 60
@@ -240,10 +240,6 @@ async def check_signals(symbol, timeframe):
                          last_row['rsi_ema'] > RSI_HIGH and \
                          ema_color == 'lime' and \
                          score >= 60
-
-        if VOLUME_FILTER and not volume_filter_check(df['volume'].values):
-            logger.info(f"{symbol} {timeframe}: Hacim düşük")
-            return
 
         if buy_condition and current_pos['signal'] != 'buy':
             entry_price = last_row['close']
