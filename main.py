@@ -113,6 +113,18 @@ def calculate_macd(closes, fast=12, slow=26, signal=9):
     macd_signal = macd.ewm(span=signal, min_periods=signal-1).mean()
     return macd.iloc[-1], macd_signal.iloc[-1]
 
+def calculate_obv(df):
+    obv = np.zeros(len(df))
+    obv[0] = df['volume'][0]
+    for i in range(1, len(df)):
+        if df['close'][i] > df['close'][i-1]:
+            obv[i] = obv[i-1] + df['volume'][i]
+        elif df['close'][i] < df['close'][i-1]:
+            obv[i] = obv[i-1] - df['volume'][i]
+        else:
+            obv[i] = obv[i-1]
+    return obv
+
 def volume_filter_check(volumes):
     if len(volumes) < 20:
         return True
@@ -128,6 +140,7 @@ def calculate_indicators(df):
     df['rsi_ema'] = calculate_rsi_ema(df['rsi'])
     df['ema200'] = calculate_ema200(closes)
     df['atr'] = calculate_atr(df)
+    df['obv'] = calculate_obv(df)
     macd, macd_signal = calculate_macd(closes)
     df['macd'] = macd
     df['macd_signal'] = macd_signal
@@ -167,7 +180,7 @@ async def check_signals(symbol, timeframe):
 
         macd, macd_signal = last_row['macd'], last_row['macd_signal']
         
-        lookback = 30  # 50’den 30’a düşürüldü
+        lookback = 30
         price_slice = df['close'].values[-lookback:]
         ema_slice = df['rsi_ema'].values[-lookback:]
         volume_slice = df['volume'].values[-lookback:]
@@ -201,14 +214,14 @@ async def check_signals(symbol, timeframe):
             score += 10
         if ema_color == 'red':
             score += 10
+        if last_row['obv'] > prev_row['obv']:
+            score += 10
 
         buy_condition = (prev_row['ema20'] <= prev_row['ema50'] and last_row['ema20'] > last_row['ema50']) and \
                         last_row['close'] > last_row['ema200'] and \
-                        bullish and \
                         last_row['rsi_ema'] < RSI_LOW and \
                         ema_color == 'red' and \
-                        macd > macd_signal and \
-                        score >= 70
+                        score >= 60
 
         score = 0
         if bearish:
@@ -219,14 +232,14 @@ async def check_signals(symbol, timeframe):
             score += 10
         if ema_color == 'lime':
             score += 10
+        if last_row['obv'] < prev_row['obv']:
+            score += 10
 
         sell_condition = (prev_row['ema20'] >= prev_row['ema50'] and last_row['ema20'] < last_row['ema50']) and \
                          last_row['close'] < last_row['ema200'] and \
-                         bearish and \
                          last_row['rsi_ema'] > RSI_HIGH and \
                          ema_color == 'lime' and \
-                         macd < macd_signal and \
-                         score >= 70
+                         score >= 60
 
         if VOLUME_FILTER and not volume_filter_check(df['volume'].values):
             logger.info(f"{symbol} {timeframe}: Hacim düşük")
