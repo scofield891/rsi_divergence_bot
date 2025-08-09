@@ -13,7 +13,7 @@ import sys
 BOT_TOKEN = '7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY'
 CHAT_ID = '-1002755412514'
 TEST_MODE = False
-VOLUME_FILTER = False  # Hacim filtresi kaldırıldı
+VOLUME_FILTER = True
 VOLUME_MULTIPLIER = 1.2
 RSI_LOW = 40
 RSI_HIGH = 60
@@ -180,7 +180,7 @@ async def check_signals(symbol, timeframe):
 
         macd, macd_signal = last_row['macd'], last_row['macd_signal']
         
-        lookback = 30
+        lookback = 20
         price_slice = df['close'].values[-lookback:]
         ema_slice = df['rsi_ema'].values[-lookback:]
         volume_slice = df['volume'].values[-lookback:]
@@ -189,20 +189,19 @@ async def check_signals(symbol, timeframe):
         bullish = False
         bearish = False
         min_distance = 5
-        ema_color = 'lime' if last_row['rsi_ema'] > prev_row['rsi_ema'] else 'red'
 
         if len(price_lows) >= 2:
             last_low = price_lows[-1]
             prev_low = price_lows[-2]
             if (last_low - prev_low) >= min_distance:
-                if price_slice[last_low] < price_slice[prev_low] and ema_slice[last_low] > (ema_slice[prev_low] + EMA_THRESHOLD):
+                if price_slice[last_low] < price_slice[prev_low] and ema_slice[last_low] > (ema_slice[prev_low] + EMA_THRESHOLD) and ema_slice[last_low] < RSI_LOW:
                     bullish = True
 
         if len(price_highs) >= 2:
             last_high = price_highs[-1]
             prev_high = price_highs[-2]
             if (last_high - prev_high) >= min_distance:
-                if price_slice[last_high] > price_slice[prev_high] and ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD):
+                if price_slice[last_high] > price_slice[prev_high] and ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD) and ema_slice[last_high] > RSI_HIGH:
                     bearish = True
 
         score = 0
@@ -212,16 +211,13 @@ async def check_signals(symbol, timeframe):
             score += 20
         if volume_filter_check(df['volume'].values):
             score += 10
-        if ema_color == 'red':
-            score += 10
         if last_row['obv'] > prev_row['obv']:
             score += 10
 
         buy_condition = (prev_row['ema20'] <= prev_row['ema50'] and last_row['ema20'] > last_row['ema50']) and \
                         last_row['close'] > last_row['ema200'] and \
-                        last_row['rsi_ema'] < RSI_LOW and \
-                        ema_color == 'red' and \
-                        score >= 60
+                        bullish and \
+                        score >= 50
 
         score = 0
         if bearish:
@@ -230,23 +226,24 @@ async def check_signals(symbol, timeframe):
             score += 20
         if volume_filter_check(df['volume'].values):
             score += 10
-        if ema_color == 'lime':
-            score += 10
         if last_row['obv'] < prev_row['obv']:
             score += 10
 
         sell_condition = (prev_row['ema20'] >= prev_row['ema50'] and last_row['ema20'] < last_row['ema50']) and \
                          last_row['close'] < last_row['ema200'] and \
-                         last_row['rsi_ema'] > RSI_HIGH and \
-                         ema_color == 'lime' and \
-                         score >= 60
+                         bearish and \
+                         score >= 50
+
+        if VOLUME_FILTER and not volume_filter_check(df['volume'].values):
+            logger.info(f"{symbol} {timeframe}: Hacim düşük")
+            return
 
         if buy_condition and current_pos['signal'] != 'buy':
             entry_price = last_row['close']
             atr = last_row['atr']
             tp_price = entry_price + (3 * atr)
             sl_price = entry_price - (1.5 * atr)
-            message = f"{symbol} {timeframe}: BUY (LONG) 🚀\nRSI_EMA: {last_row['rsi_ema']:.2f} (Color: {ema_color.upper()})\nDivergence: Bullish\nMACD: {macd:.4f}\nEntry: {entry_price:.4f}\nTP: {tp_price:.4f}\nSL: {sl_price:.4f}\nScore: {score}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+            message = f"{symbol} {timeframe}: BUY (LONG) 🚀\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bullish\nMACD: {macd:.4f}\nEntry: {entry_price:.4f}\nTP: {tp_price:.4f}\nSL: {sl_price:.4f}\nScore: {score}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
             signal_cache[key] = {'signal': 'buy', 'entry_price': entry_price, 'tp_price': tp_price, 'sl_price': sl_price}
@@ -256,7 +253,7 @@ async def check_signals(symbol, timeframe):
             atr = last_row['atr']
             tp_price = entry_price - (3 * atr)
             sl_price = entry_price + (1.5 * atr)
-            message = f"{symbol} {timeframe}: SELL (SHORT) 📉\nRSI_EMA: {last_row['rsi_ema']:.2f} (Color: {ema_color.upper()})\nDivergence: Bearish\nMACD: {macd:.4f}\nEntry: {entry_price:.4f}\nTP: {tp_price:.4f}\nSL: {sl_price:.4f}\nScore: {score}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+            message = f"{symbol} {timeframe}: SELL (SHORT) 📉\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bearish\nMACD: {macd:.4f}\nEntry: {entry_price:.4f}\nTP: {tp_price:.4f}\nSL: {sl_price:.4f}\nScore: {score}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
             signal_cache[key] = {'signal': 'sell', 'entry_price': entry_price, 'tp_price': tp_price, 'sl_price': sl_price}
