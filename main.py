@@ -2,7 +2,6 @@ import ccxt
 import numpy as np
 import pandas as pd
 from telegram import Bot
-from dotenv import load_dotenv
 import os
 import logging
 import asyncio
@@ -10,15 +9,15 @@ from datetime import datetime
 import pytz
 import sys
 
-load_dotenv()
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-CHAT_ID = os.getenv('CHAT_ID')
-TEST_MODE = os.getenv('TEST_MODE', 'False').lower() == 'true'
+# Sabit değerler
+BOT_TOKEN = '7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY'
+CHAT_ID = '-1002755412514'
+TEST_MODE = False
 VOLUME_FILTER = True
-VOLUME_MULTIPLIER = 1.2  # Esnetildi, sinyaller artsın
-RSI_LOW = float(os.getenv('RSI_LOW', 40))
-RSI_HIGH = float(os.getenv('RSI_HIGH', 60))
-EMA_THRESHOLD = float(os.getenv('EMA_THRESHOLD', 1.0))
+VOLUME_MULTIPLIER = 1.2
+RSI_LOW = 40
+RSI_HIGH = 60
+EMA_THRESHOLD = 1.0
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
