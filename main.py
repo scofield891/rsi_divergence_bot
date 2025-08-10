@@ -157,17 +157,12 @@ async def check_signals(symbol, timeframe):
         lookback = 20
         price_slice = df['close'].values[-lookback:]
         ema_slice = df['rsi_ema'].values[-lookback:]
-        ema13_slice = df['ema13'].values[-lookback:]
-        sma34_slice = df['sma34'].values[-lookback:]
         price_highs, price_lows = find_local_extrema(price_slice)
         
         bullish = False
         bearish = False
-        ema_sma_crossover_buy = False
-        ema_sma_crossover_sell = False
         min_distance = 5
 
-        # Divergence kontrolü (son 20 mum)
         if len(price_lows) >= 2:
             last_low = price_lows[-1]
             prev_low = price_lows[-2]
@@ -181,13 +176,6 @@ async def check_signals(symbol, timeframe):
             if (last_high - prev_high) >= min_distance:
                 if price_slice[last_high] > price_slice[prev_high] and ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD) and ema_slice[last_high] > RSI_HIGH:
                     bearish = True
-
-        # EMA13+SMA34 kesişim kontrolü (son 20 mum)
-        for i in range(1, lookback):
-            if ema13_slice[-i-1] <= sma34_slice[-i-1] and ema13_slice[-i] > sma34_slice[-i]:
-                ema_sma_crossover_buy = True
-            if ema13_slice[-i-1] >= sma34_slice[-i-1] and ema13_slice[-i] < sma34_slice[-i]:
-                ema_sma_crossover_sell = True
 
         logger.info(f"{symbol} {timeframe}: Divergence: {bullish or bearish}, EMA13+SMA34 Kesişim: {ema_sma_crossover_buy or ema_sma_crossover_sell}")
 
