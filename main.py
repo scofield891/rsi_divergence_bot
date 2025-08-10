@@ -177,6 +177,16 @@ async def check_signals(symbol, timeframe):
                 if price_slice[last_high] > price_slice[prev_high] and ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD) and ema_slice[last_high] > RSI_HIGH:
                     bearish = True
 
+        ema_sma_crossover_buy = False
+        ema_sma_crossover_sell = False
+
+        # EMA13+SMA34 kesişim kontrolü (son 20 mum, mum kapanışında teyit)
+        for i in range(1, lookback):
+            if df['ema13'].values[-i-1] <= df['sma34'].values[-i-1] and df['ema13'].values[-i] > df['sma34'].values[-i] and df['close'].values[-i] > df['sma34'].values[-i]:
+                ema_sma_crossover_buy = True
+            if df['ema13'].values[-i-1] >= df['sma34'].values[-i-1] and df['ema13'].values[-i] < df['sma34'].values[-i] and df['close'].values[-i] < df['sma34'].values[-i]:
+                ema_sma_crossover_sell = True
+
         logger.info(f"{symbol} {timeframe}: Divergence: {bullish or bearish}, EMA13+SMA34 Kesişim: {ema_sma_crossover_buy or ema_sma_crossover_sell}")
 
         buy_condition = ema_sma_crossover_buy and bullish
@@ -185,24 +195,22 @@ async def check_signals(symbol, timeframe):
         if buy_condition and current_pos['signal'] != 'buy':
             entry_price = last_row['close']
             atr = last_row['atr']
-            tp_price = entry_price + (3 * atr)
             sl_price = entry_price - (1.5 * atr)
-            message = f"{symbol} {timeframe}: BUY (LONG) 🚀\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bullish\nEntry: {entry_price:.4f}\nTP: {tp_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+            message = f"{symbol} {timeframe}: BUY (LONG) 🚀\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bullish\nEntry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
-            signal_cache[key] = {'signal': 'buy', 'entry_price': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'highest_price': entry_price, 'lowest_price': None}
+            signal_cache[key] = {'signal': 'buy', 'entry_price': entry_price, 'sl_price': sl_price, 'highest_price': entry_price, 'lowest_price': None}
 
         elif sell_condition and current_pos['signal'] != 'sell':
             entry_price = last_row['close']
             atr = last_row['atr']
-            tp_price = entry_price - (3 * atr)
             sl_price = entry_price + (1.5 * atr)
-            message = f"{symbol} {timeframe}: SELL (SHORT) 📉\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bearish\nEntry: {entry_price:.4f}\nTP: {tp_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+            message = f"{symbol} {timeframe}: SELL (SHORT) 📉\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bearish\nEntry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
-            signal_cache[key] = {'signal': 'sell', 'entry_price': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'highest_price': None, 'lowest_price': entry_price}
+            signal_cache[key] = {'signal': 'sell', 'entry_price': entry_price, 'sl_price': sl_price, 'highest_price': None, 'lowest_price': entry_price}
 
-        # Trailing & Kapanış Mantığı
+        # Trailing & Kapanış Mantığı (TP'siz, sadece SL/TSL)
         if current_pos['signal'] == 'buy':
             current_price = last_row['close']
             atr = last_row['atr']
@@ -211,23 +219,19 @@ async def check_signals(symbol, timeframe):
             if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
                 current_pos['highest_price'] = current_price
 
-            # TP’ye ilerleme (0..1)
-            tp_denom = (current_pos['tp_price'] - current_pos['entry_price']) if current_pos['tp_price'] is not None and current_pos['entry_price'] is not None else 0
-            progress = (current_price - current_pos['entry_price']) / tp_denom if tp_denom > 0 else 0.0
-
-            # Trailing sadece TP’ye %80 yaklaşınca ve kârda ATR koşulu sağlanınca devreye girsin
-            if progress >= TRAIL_ARM_PROGRESS and current_price >= current_pos['entry_price'] + (TRAILING_ACTIVATION * atr):
+            # Trailing SL kârda 1x ATR ilerlerse devreye girer
+            if current_price >= current_pos['entry_price'] + (TRAILING_ACTIVATION * atr):
                 trailing_sl = current_pos['highest_price'] - (TRAILING_DISTANCE * atr)
                 current_pos['sl_price'] = max(current_pos['sl_price'], trailing_sl)
 
-            # Kapanış: önce TP, sonra SL
-            close_long_condition = (current_price >= current_pos['tp_price']) or (current_price <= current_pos['sl_price'])
+            # Kapanış: sadece SL/TSL
+            close_long_condition = (current_price <= current_pos['sl_price'])
             if close_long_condition:
-                reason = "TP Hit" if current_price >= current_pos['tp_price'] else "SL Hit"
+                reason = "SL Hit"
                 message = f"{symbol} {timeframe}: CLOSE LONG 📉 ({reason})\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Exit: {message}")
-                signal_cache[key] = {'signal': None, 'entry_price': None, 'tp_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None}
+                signal_cache[key] = {'signal': None, 'entry_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None}
 
         elif current_pos['signal'] == 'sell':
             current_price = last_row['close']
@@ -237,23 +241,19 @@ async def check_signals(symbol, timeframe):
             if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
                 current_pos['lowest_price'] = current_price
 
-            # TP’ye ilerleme (0..1) short için tersten
-            tp_denom = (current_pos['entry_price'] - current_pos['tp_price']) if current_pos['tp_price'] is not None and current_pos['entry_price'] is not None else 0
-            progress = (current_pos['entry_price'] - current_price) / tp_denom if tp_denom > 0 else 0.0
-
-            # Trailing sadece TP’ye %80 yaklaşınca ve kârda ATR koşulu sağlanınca devreye girsin
-            if progress >= TRAIL_ARM_PROGRESS and current_price <= current_pos['entry_price'] - (TRAILING_ACTIVATION * atr):
+            # Trailing SL kârda 1x ATR ilerlerse devreye girer
+            if current_price <= current_pos['entry_price'] - (TRAILING_ACTIVATION * atr):
                 trailing_sl = current_pos['lowest_price'] + (TRAILING_DISTANCE * atr)
                 current_pos['sl_price'] = min(current_pos['sl_price'], trailing_sl)
 
-            # Kapanış: önce TP, sonra SL
-            close_short_condition = (current_price <= current_pos['tp_price']) or (current_price >= current_pos['sl_price'])
+            # Kapanış: sadece SL/TSL
+            close_short_condition = (current_price >= current_pos['sl_price'])
             if close_short_condition:
-                reason = "TP Hit" if current_price <= current_pos['tp_price'] else "SL Hit"
+                reason = "SL Hit"
                 message = f"{symbol} {timeframe}: CLOSE SHORT 🚀 ({reason})\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Exit: {message}")
-                signal_cache[key] = {'signal': None, 'entry_price': None, 'tp_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None}
+                signal_cache[key] = {'signal': None, 'entry_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None}
 
     except Exception as e:
         logger.error(f"Hata ({symbol} {timeframe}): {str(e)}")
