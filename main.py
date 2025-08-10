@@ -18,7 +18,7 @@ RSI_HIGH = 60
 EMA_THRESHOLD = 1.0
 TRAILING_ACTIVATION = 1.0  # 1x ATR kârda trailing SL devreye girer
 TRAILING_DISTANCE = 0.5    # 0.5x ATR geri çekilmeye izin verir
-TRAIL_ARM_PROGRESS = 0.80  # TP mesafesinin %80'i görülmeden trailing aktif olmasın
+TRAIL_ARM_PROGRESS = 0.80  # TP mesafesinin %80'i görülmeden trailing aktif olmaz
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -154,15 +154,20 @@ async def check_signals(symbol, timeframe):
         key = f"{symbol}_{timeframe}"
         current_pos = signal_cache.get(key, {'signal': None, 'entry_price': None, 'tp_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None})
 
-        lookback = 30
+        lookback = 20
         price_slice = df['close'].values[-lookback:]
         ema_slice = df['rsi_ema'].values[-lookback:]
+        ema13_slice = df['ema13'].values[-lookback:]
+        sma34_slice = df['sma34'].values[-lookback:]
         price_highs, price_lows = find_local_extrema(price_slice)
         
         bullish = False
         bearish = False
+        ema_sma_crossover_buy = False
+        ema_sma_crossover_sell = False
         min_distance = 5
 
+        # Divergence kontrolü (son 20 mum)
         if len(price_lows) >= 2:
             last_low = price_lows[-1]
             prev_low = price_lows[-2]
@@ -177,8 +182,12 @@ async def check_signals(symbol, timeframe):
                 if price_slice[last_high] > price_slice[prev_high] and ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD) and ema_slice[last_high] > RSI_HIGH:
                     bearish = True
 
-        ema_sma_crossover_buy = prev_row['ema13'] <= prev_row['sma34'] and last_row['ema13'] > last_row['sma34']
-        ema_sma_crossover_sell = prev_row['ema13'] >= prev_row['sma34'] and last_row['ema13'] < last_row['sma34']
+        # EMA13+SMA34 kesişim kontrolü (son 20 mum)
+        for i in range(1, lookback):
+            if ema13_slice[-i-1] <= sma34_slice[-i-1] and ema13_slice[-i] > sma34_slice[-i]:
+                ema_sma_crossover_buy = True
+            if ema13_slice[-i-1] >= sma34_slice[-i-1] and ema13_slice[-i] < sma34_slice[-i]:
+                ema_sma_crossover_sell = True
 
         logger.info(f"{symbol} {timeframe}: Divergence: {bullish or bearish}, EMA13+SMA34 Kesişim: {ema_sma_crossover_buy or ema_sma_crossover_sell}")
 
@@ -205,7 +214,7 @@ async def check_signals(symbol, timeframe):
             logger.info(f"Sinyal: {message}")
             signal_cache[key] = {'signal': 'sell', 'entry_price': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'highest_price': None, 'lowest_price': entry_price}
 
-        # === Trailing & Kapanış Mantığı (GÜNCELLENDİ) ===
+        # Trailing & Kapanış Mantığı
         if current_pos['signal'] == 'buy':
             current_price = last_row['close']
             atr = last_row['atr']
@@ -214,11 +223,11 @@ async def check_signals(symbol, timeframe):
             if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
                 current_pos['highest_price'] = current_price
 
-            # TP'ye ilerleme (0..1)
+            # TP’ye ilerleme (0..1)
             tp_denom = (current_pos['tp_price'] - current_pos['entry_price']) if current_pos['tp_price'] is not None and current_pos['entry_price'] is not None else 0
             progress = (current_price - current_pos['entry_price']) / tp_denom if tp_denom > 0 else 0.0
 
-            # Trailing sadece TP'ye yeterince yaklaşınca ve kârda ATR koşulu sağlanınca devreye girsin
+            # Trailing sadece TP’ye %80 yaklaşınca ve kârda ATR koşulu sağlanınca devreye girsin
             if progress >= TRAIL_ARM_PROGRESS and current_price >= current_pos['entry_price'] + (TRAILING_ACTIVATION * atr):
                 trailing_sl = current_pos['highest_price'] - (TRAILING_DISTANCE * atr)
                 current_pos['sl_price'] = max(current_pos['sl_price'], trailing_sl)
@@ -236,15 +245,15 @@ async def check_signals(symbol, timeframe):
             current_price = last_row['close']
             atr = last_row['atr']
 
-            # En düşük fiyat güncelle (None guard önce)
+            # En düşük fiyat güncelle
             if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
                 current_pos['lowest_price'] = current_price
 
-            # TP'ye ilerleme (0..1) short için tersten
+            # TP’ye ilerleme (0..1) short için tersten
             tp_denom = (current_pos['entry_price'] - current_pos['tp_price']) if current_pos['tp_price'] is not None and current_pos['entry_price'] is not None else 0
             progress = (current_pos['entry_price'] - current_price) / tp_denom if tp_denom > 0 else 0.0
 
-            # Trailing sadece TP'ye yeterince yaklaşınca ve kârda ATR koşulu sağlanınca devreye girsin
+            # Trailing sadece TP’ye %80 yaklaşınca ve kârda ATR koşulu sağlanınca devreye girsin
             if progress >= TRAIL_ARM_PROGRESS and current_price <= current_pos['entry_price'] - (TRAILING_ACTIVATION * atr):
                 trailing_sl = current_pos['lowest_price'] + (TRAILING_DISTANCE * atr)
                 current_pos['sl_price'] = min(current_pos['sl_price'], trailing_sl)
@@ -257,7 +266,6 @@ async def check_signals(symbol, timeframe):
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Exit: {message}")
                 signal_cache[key] = {'signal': None, 'entry_price': None, 'tp_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None}
-        # === /GÜNCEL ===
 
     except Exception as e:
         logger.error(f"Hata ({symbol} {timeframe}): {str(e)}")
