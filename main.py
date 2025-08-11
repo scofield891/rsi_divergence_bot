@@ -212,7 +212,7 @@ async def check_signals(symbol, timeframe):
 
         # Trailing & Kapanış Mantığı (TP'siz, sadece SL/TSL)
         if current_pos['signal'] == 'buy':
-            current_price = df.iloc[-1]['close']  # Güncel fiyat için son mum
+            current_price = df.iloc[-1]['close']
             # En yüksek fiyat güncelle
             if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
                 current_pos['highest_price'] = current_price
@@ -225,14 +225,17 @@ async def check_signals(symbol, timeframe):
             # Kapanış: sadece SL/TSL
             close_long_condition = (current_price <= current_pos['sl_price'])
             if close_long_condition:
-                reason = "SL Hit"
-                message = f"{symbol} {timeframe}: CLOSE LONG 📉 ({reason})\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100  # Kâr/zarar yüzdesi
+                if current_price < current_pos['entry_price']:  # Zarar
+                    message = f"{symbol} {timeframe}: STOP LONG 📉\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nProfit/Loss: {profit_percent:.2f}%\nSTOP 😞\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                else:  # Kâr
+                    message = f"{symbol} {timeframe}: LONG 🚀\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nProfit/Loss: {profit_percent:.2f}%\nPARAYI VURDUK 🚀\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Exit: {message}")
                 signal_cache[key] = {'signal': None, 'entry_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None}
 
         elif current_pos['signal'] == 'sell':
-            current_price = df.iloc[-1]['close']  # Güncel fiyat için son mum
+            current_price = df.iloc[-1]['close']
             # En düşük fiyat güncelle
             if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
                 current_pos['lowest_price'] = current_price
@@ -245,8 +248,11 @@ async def check_signals(symbol, timeframe):
             # Kapanış: sadece SL/TSL
             close_short_condition = (current_price >= current_pos['sl_price'])
             if close_short_condition:
-                reason = "SL Hit"
-                message = f"{symbol} {timeframe}: CLOSE SHORT 🚀 ({reason})\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100  # Kâr/zarar yüzdesi
+                if current_price > current_pos['entry_price']:  # Zarar
+                    message = f"{symbol} {timeframe}: STOP SHORT 📉\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nProfit/Loss: {profit_percent:.2f}%\nSTOP 😞\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                else:  # Kâr
+                    message = f"{symbol} {timeframe}: SHORT 🚀\nPrice: {current_price:.4f}\nRSI_EMA: {last_row['rsi_ema']:.2f}\nProfit/Loss: {profit_percent:.2f}%\nPARAYI VURDUK 🚀\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Exit: {message}")
                 signal_cache[key] = {'signal': None, 'entry_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None}
