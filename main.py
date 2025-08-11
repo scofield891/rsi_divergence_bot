@@ -17,8 +17,8 @@ RSI_LOW = 40
 RSI_HIGH = 60
 EMA_THRESHOLD = 1.0
 TRAILING_ACTIVATION = 1.0  # 1x ATR kârda trailing SL devreye girer
-TRAILING_DISTANCE = 0.5    # 0.5x ATR geri çekilmeye izin verir
-TRAIL_ARM_PROGRESS = 0.80  # TP mesafesinin %80'i görülmeden trailing aktif olmaz
+TRAILING_DISTANCE = 2.0    # 2x ATR geri çekilmeye izin verir (genişlettik)
+SL_MULTIPLIER = 5.0        # Stop Loss için 5x ATR çarpanı (genişlettik)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -152,17 +152,22 @@ async def check_signals(symbol, timeframe):
         prev_row = df.iloc[-2]
 
         key = f"{symbol}_{timeframe}"
-        current_pos = signal_cache.get(key, {'signal': None, 'entry_price': None, 'tp_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None})
+        current_pos = signal_cache.get(key, {'signal': None, 'entry_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None})
 
         lookback = 20
         price_slice = df['close'].values[-lookback:]
         ema_slice = df['rsi_ema'].values[-lookback:]
+        ema13_slice = df['ema13'].values[-lookback:]
+        sma34_slice = df['sma34'].values[-lookback:]
         price_highs, price_lows = find_local_extrema(price_slice)
         
         bullish = False
         bearish = False
+        ema_sma_crossover_buy = False
+        ema_sma_crossover_sell = False
         min_distance = 5
 
+        # Divergence kontrolü (son 20 mum)
         if len(price_lows) >= 2:
             last_low = price_lows[-1]
             prev_low = price_lows[-2]
@@ -177,14 +182,11 @@ async def check_signals(symbol, timeframe):
                 if price_slice[last_high] > price_slice[prev_high] and ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD) and ema_slice[last_high] > RSI_HIGH:
                     bearish = True
 
-        ema_sma_crossover_buy = False
-        ema_sma_crossover_sell = False
-
         # EMA13+SMA34 kesişim kontrolü (son 20 mum, mum kapanışında teyit)
         for i in range(1, lookback):
-            if df['ema13'].values[-i-1] <= df['sma34'].values[-i-1] and df['ema13'].values[-i] > df['sma34'].values[-i] and df['close'].values[-i] > df['sma34'].values[-i]:
+            if ema13_slice[-i-1] <= sma34_slice[-i-1] and ema13_slice[-i] > sma34_slice[-i] and df['close'].values[-i] > sma34_slice[-i]:
                 ema_sma_crossover_buy = True
-            if df['ema13'].values[-i-1] >= df['sma34'].values[-i-1] and df['ema13'].values[-i] < df['sma34'].values[-i] and df['close'].values[-i] < df['sma34'].values[-i]:
+            if ema13_slice[-i-1] >= sma34_slice[-i-1] and ema13_slice[-i] < sma34_slice[-i] and df['close'].values[-i] < sma34_slice[-i]:
                 ema_sma_crossover_sell = True
 
         logger.info(f"{symbol} {timeframe}: Divergence: {bullish or bearish}, EMA13+SMA34 Kesişim: {ema_sma_crossover_buy or ema_sma_crossover_sell}")
@@ -195,7 +197,7 @@ async def check_signals(symbol, timeframe):
         if buy_condition and current_pos['signal'] != 'buy':
             entry_price = last_row['close']
             atr = last_row['atr']
-            sl_price = entry_price - (1.5 * atr)
+            sl_price = entry_price - (SL_MULTIPLIER * atr)  # 5x ATR
             message = f"{symbol} {timeframe}: BUY (LONG) 🚀\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bullish\nEntry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
@@ -204,7 +206,7 @@ async def check_signals(symbol, timeframe):
         elif sell_condition and current_pos['signal'] != 'sell':
             entry_price = last_row['close']
             atr = last_row['atr']
-            sl_price = entry_price + (1.5 * atr)
+            sl_price = entry_price + (SL_MULTIPLIER * atr)  # 5x ATR
             message = f"{symbol} {timeframe}: SELL (SHORT) 📉\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bearish\nEntry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
