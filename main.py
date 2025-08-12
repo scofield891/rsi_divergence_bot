@@ -17,7 +17,10 @@ RSI_LOW = 40
 RSI_HIGH = 60
 EMA_THRESHOLD = 1.0
 TRAILING_ACTIVATION = 1.0  # 1x ATR kârda trailing SL devreye girer
-TRAILING_DISTANCE = 2.0    # 2x ATR geri çekilmeye izin verir
+TRAILING_DISTANCE_BASE = 2.0  # Temel TSL mesafesi
+TRAILING_DISTANCE_HIGH_VOL = 3.0  # Yüksek volatilite için genişletilmiş
+VOLATILITY_THRESHOLD = 0.02  # ATR ortalaması / entry_price > %2 ise yüksek vol
+LOOKBACK_ATR = 18  # Son 18 mum (5+13) için ATR ortalaması
 SL_MULTIPLIER = 5.0        # Stop Loss için 5x ATR çarpanı
 
 logger = logging.getLogger()
@@ -111,7 +114,7 @@ def calculate_atr(df, period=14):
     low_close = np.abs(df['low'] - df['close'].shift())
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = true_range.rolling(window=period).mean()
-    return atr.iloc[-1]
+    return atr
 
 def calculate_indicators(df):
     closes = df['close'].values
@@ -136,7 +139,7 @@ async def check_signals(symbol, timeframe):
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=200)
+                    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=LOOKBACK_ATR + 13)  # 18+13 mum
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     break
                 except ccxt.RequestTimeout as e:
@@ -153,6 +156,10 @@ async def check_signals(symbol, timeframe):
 
         key = f"{symbol}_{timeframe}"
         current_pos = signal_cache.get(key, {'signal': None, 'entry_price': None, 'sl_price': None, 'highest_price': None, 'lowest_price': None, 'trailing_activated': False})
+
+        # Timeframe bazlı ATR ortalaması
+        atr_series = calculate_atr(df).tail(LOOKBACK_ATR)  # Son 18 mumun ATR'si
+        avg_atr_ratio = atr_series.mean() / last_row['close'] if not atr_series.empty else 0.0
 
         lookback = 20
         price_slice = df['close'].values[-lookback-1:-1]
@@ -200,7 +207,7 @@ async def check_signals(symbol, timeframe):
             message = f"{symbol} {timeframe}: BUY (LONG) 🚀\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bullish\nEntry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
-            signal_cache[key] = {'signal': 'buy', 'entry_price': entry_price, 'sl_price': sl_price, 'highest_price': entry_price, 'lowest_price': None, 'trailing_activated': False}
+            signal_cache[key] = {'signal': 'buy', 'entry_price': entry_price, 'sl_price': sl_price, 'highest_price': entry_price, 'lowest_price': None, 'trailing_activated': False, 'avg_atr_ratio': avg_atr_ratio}
 
         elif sell_condition and current_pos['signal'] != 'sell':
             entry_price = last_row['close']
@@ -208,22 +215,26 @@ async def check_signals(symbol, timeframe):
             message = f"{symbol} {timeframe}: SELL (SHORT) 📉\nRSI_EMA: {last_row['rsi_ema']:.2f}\nDivergence: Bearish\nEntry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
-            signal_cache[key] = {'signal': 'sell', 'entry_price': entry_price, 'sl_price': sl_price, 'highest_price': None, 'lowest_price': entry_price, 'trailing_activated': False}
+            signal_cache[key] = {'signal': 'sell', 'entry_price': entry_price, 'sl_price': sl_price, 'highest_price': None, 'lowest_price': entry_price, 'trailing_activated': False, 'avg_atr_ratio': avg_atr_ratio}
 
         # Trailing & Kapanış Mantığı (TP'siz, sadece SL/TSL)
         if current_pos['signal'] == 'buy':
             current_price = df.iloc[-1]['close']
+            # Timeframe bazlı volatilite kontrolü (sinyal anındaki avg_atr_ratio)
+            avg_atr_ratio = current_pos.get('avg_atr_ratio', 0.0)
+            trailing_distance = TRAILING_DISTANCE_HIGH_VOL if avg_atr_ratio > VOLATILITY_THRESHOLD else TRAILING_DISTANCE_BASE
+
             # En yüksek fiyat güncelle
             if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
                 current_pos['highest_price'] = current_price
 
             # Trailing SL kârda 1x ATR ilerlerse devreye girer ve sadece ilk kez bildirim gönder
             if current_price >= current_pos['entry_price'] + (TRAILING_ACTIVATION * atr) and not current_pos['trailing_activated']:
-                trailing_sl = current_pos['highest_price'] - (TRAILING_DISTANCE * atr)
+                trailing_sl = current_pos['highest_price'] - (trailing_distance * atr)
                 current_pos['sl_price'] = max(current_pos['sl_price'], trailing_sl)
                 current_pos['trailing_activated'] = True
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
-                message = f"{symbol} {timeframe}: TRAILING ACTIVE 🚧\nCurrent Price: {current_price:.4f}\nEntry Price: {current_pos['entry_price']:.4f}\nNew SL: {trailing_sl:.4f}\nProfit: {profit_percent:.2f}%\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = f"{symbol} {timeframe}: TRAILING ACTIVE 🚧\nCurrent Price: {current_price:.4f}\nEntry Price: {current_pos['entry_price']:.4f}\nNew SL: {trailing_sl:.4f}\nProfit: {profit_percent:.2f}%\nVol Ratio: {avg_atr_ratio:.4f}\nTSL Distance: {trailing_distance}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Trailing Activated: {message}")
 
@@ -241,17 +252,21 @@ async def check_signals(symbol, timeframe):
 
         elif current_pos['signal'] == 'sell':
             current_price = df.iloc[-1]['close']
+            # Timeframe bazlı volatilite kontrolü (sinyal anındaki avg_atr_ratio)
+            avg_atr_ratio = current_pos.get('avg_atr_ratio', 0.0)
+            trailing_distance = TRAILING_DISTANCE_HIGH_VOL if avg_atr_ratio > VOLATILITY_THRESHOLD else TRAILING_DISTANCE_BASE
+
             # En düşük fiyat güncelle
             if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
                 current_pos['lowest_price'] = current_price
 
             # Trailing SL kârda 1x ATR ilerlerse devreye girer ve sadece ilk kez bildirim gönder
             if current_price <= current_pos['entry_price'] - (TRAILING_ACTIVATION * atr) and not current_pos['trailing_activated']:
-                trailing_sl = current_pos['lowest_price'] + (TRAILING_DISTANCE * atr)
+                trailing_sl = current_pos['lowest_price'] + (trailing_distance * atr)
                 current_pos['sl_price'] = min(current_pos['sl_price'], trailing_sl)
                 current_pos['trailing_activated'] = True
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
-                message = f"{symbol} {timeframe}: TRAILING ACTIVE 🚧\nCurrent Price: {current_price:.4f}\nEntry Price: {current_pos['entry_price']:.4f}\nNew SL: {trailing_sl:.4f}\nProfit: {profit_percent:.2f}%\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = f"{symbol} {timeframe}: TRAILING ACTIVE 🚧\nCurrent Price: {current_price:.4f}\nEntry Price: {current_pos['entry_price']:.4f}\nNew SL: {trailing_sl:.4f}\nProfit: {profit_percent:.2f}%\nVol Ratio: {avg_atr_ratio:.4f}\nTSL Distance: {trailing_distance}\nTime: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Trailing Activated: {message}")
 
