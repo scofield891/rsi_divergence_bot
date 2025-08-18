@@ -88,7 +88,11 @@ def calculate_rsi_ema(rsi, ema_length=14):
         ema[i] = (rsi[i] * alpha) + (ema[i-1] * (1 - alpha))
     return ema
 
-def calculate_macd(closes, fast=12, slow=26, signal=9):
+def calculate_macd(closes, timeframe):
+    if timeframe == '1h':
+        fast, slow, signal = 8, 17, 9
+    else:  # 2h ve 4h için standart
+        fast, slow, signal = 12, 26, 9
     def ema(x, n):
         k = 2 / (n + 1)
         e = np.zeros_like(x, dtype=np.float64)
@@ -134,13 +138,13 @@ def get_atr_values(df, lookback_atr=18):
     avg_atr_ratio = float(atr_series.mean() / close_last) if len(atr_series) else np.nan
     return atr_value, avg_atr_ratio
 
-def calculate_indicators(df):
+def calculate_indicators(df, timeframe):
     closes = df['close'].values.astype(np.float64)
     df['ema13'] = calculate_ema(closes, span=13)
     df['sma34'] = calculate_sma(closes, period=34)
     df['rsi'] = calculate_rsi(closes)
     df['rsi_ema'] = calculate_rsi_ema(df['rsi'])
-    df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(closes)
+    df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(closes, timeframe)
     return df
 
 # ----------------- sinyal döngüsü -----------------
@@ -167,7 +171,7 @@ async def check_signals(symbol, timeframe):
                     if attempt == max_retries - 1:
                         raise
                     await asyncio.sleep(5)
-        df = calculate_indicators(df)
+        df = calculate_indicators(df, timeframe)
         atr_value, avg_atr_ratio = get_atr_values(df, LOOKBACK_ATR)
         # ATR hazır değilse (ilk barlar), bu turu atla
         if not np.isfinite(atr_value) or not np.isfinite(avg_atr_ratio):
