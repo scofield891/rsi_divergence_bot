@@ -14,7 +14,7 @@ CHAT_ID = '-1002755412514'
 TEST_MODE = False
 RSI_LOW = 40
 RSI_HIGH = 60
-EMA_THRESHOLD = 1.0
+EMA_THRESHOLD = 0.5  # Gevşetildi: 1.0'dan 0.5'e
 TRAILING_ACTIVATION = 1.0  # 1x ATR kârda tetik
 TRAILING_DISTANCE_BASE = 2.0
 TRAILING_DISTANCE_HIGH_VOL = 3.0
@@ -88,6 +88,21 @@ def calculate_rsi_ema(rsi, ema_length=14):
         ema[i] = (rsi[i] * alpha) + (ema[i-1] * (1 - alpha))
     return ema
 
+def calculate_macd(closes, fast=12, slow=26, signal=9):
+    def ema(x, n):
+        k = 2 / (n + 1)
+        e = np.zeros_like(x, dtype=np.float64)
+        e[0] = x[0]
+        for i in range(1, len(x)):
+            e[i] = x[i] * k + e[i-1] * (1 - k)
+        return e
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = ema(macd_line, signal)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
 def find_local_extrema(arr, order=4):
     highs, lows = [], []
     for i in range(order, len(arr) - order):
@@ -125,6 +140,7 @@ def calculate_indicators(df):
     df['sma34'] = calculate_sma(closes, period=34)
     df['rsi'] = calculate_rsi(closes)
     df['rsi_ema'] = calculate_rsi_ema(df['rsi'])
+    df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(closes)
     return df
 
 # ----------------- sinyal döngüsü -----------------
@@ -199,9 +215,12 @@ async def check_signals(symbol, timeframe):
             if ema13_slice[-i-1] >= sma34_slice[-i-1] and ema13_slice[-i] < sma34_slice[-i] and \
                df['close'].values[-i] < sma34_slice[-i]:  # crossover mumunda close < sma
                 ema_sma_crossover_sell = True
-        logger.info(f"{symbol} {timeframe}: Div={bullish or bearish}, Cross={ema_sma_crossover_buy or ema_sma_crossover_sell}")
-        buy_condition = ema_sma_crossover_buy and bullish
-        sell_condition = ema_sma_crossover_sell and bearish
+        # MACD rejim filtresi
+        macd_ok_long = (df['macd'].iloc[-2] > df['macd_signal'].iloc[-2]) and (df['macd_hist'].iloc[-2] > 0)
+        macd_ok_short = (df['macd'].iloc[-2] < df['macd_signal'].iloc[-2]) and (df['macd_hist'].iloc[-2] < 0)
+        logger.info(f"{symbol} {timeframe}: Div={bullish or bearish}, Cross={ema_sma_crossover_buy or ema_sma_crossover_sell}, MACD_OK_LONG={macd_ok_long}, MACD_OK_SHORT={macd_ok_short}")
+        buy_condition = ema_sma_crossover_buy and bullish and macd_ok_long
+        sell_condition = ema_sma_crossover_sell and bearish and macd_ok_short
         # ---- SİNYAL AÇILIŞI ----
         if buy_condition and current_pos['signal'] != 'buy':
             entry_price = float(last_row['close'])
