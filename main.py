@@ -9,7 +9,7 @@ import pytz
 import sys
 
 # ================== Sabit Değerler ==================
-BOT_TOKEN = 'DEGISTIR_TELEGRAM_TOKEN'
+BOT_TOKEN = "7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY"
 CHAT_ID = '-1002755412514'
 TEST_MODE = False
 
