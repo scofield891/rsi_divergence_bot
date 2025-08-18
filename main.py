@@ -8,27 +8,31 @@ from datetime import datetime
 import pytz
 import sys
 
-# Sabit değerler
-BOT_TOKEN = '7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY'
+# ================== Sabit Değerler ==================
+BOT_TOKEN = 'DEGISTIR_TELEGRAM_TOKEN'
 CHAT_ID = '-1002755412514'
 TEST_MODE = False
+
 RSI_LOW = 40
 RSI_HIGH = 60
 EMA_THRESHOLD = 0.5
+
 TRAILING_ACTIVATION = 1.0
 TRAILING_DISTANCE_BASE = 2.0
 TRAILING_DISTANCE_HIGH_VOL = 3.0
 VOLATILITY_THRESHOLD = 0.02
+
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 3.0
 TP_MULTIPLIER = 5.0
 SL_BUFFER = 0.3
 
 # Sinyal toggles
-MACD_MODE = "regime"  # "off" | "regime" | "and"
+MACD_MODE = "regime"      # "off" | "regime" | "and"
 LOOKBACK_DIVERGENCE = 30
 DIVERGENCE_MIN_DISTANCE = 5
 
+# ================== Logging ==================
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -41,11 +45,14 @@ logger.addHandler(file_handler)
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
 
+# ================== Borsa & Bot ==================
 exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}, 'timeout': 60000})
 telegram_bot = Bot(token=BOT_TOKEN)
+
+# Pozisyon/Sinyal durumu
 signal_cache = {}
 
-# Indikatör fonksiyonları
+# ================== İndikatör Fonksiyonları ==================
 def calculate_ema(closes, span):
     k = 2 / (span + 1)
     ema = np.zeros_like(closes, dtype=np.float64)
@@ -152,20 +159,21 @@ def calculate_indicators(df, timeframe):
     df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(closes, timeframe)
     return df
 
-# ----------------- sinyal döngüsü -----------------
+# ================== Sinyal Döngüsü ==================
 async def check_signals(symbol, timeframe):
     try:
         # Veri
         if TEST_MODE:
             closes = np.abs(np.cumsum(np.random.randn(200))) * 0.05 + 0.3
             highs = closes + np.random.rand(200) * 0.01
-            lows = closes - np.random.rand(200) * 0.01
+            lows  = closes - np.random.rand(200) * 0.01
             volumes = np.random.rand(200) * 10000
             ohlcv = [[0, closes[i], highs[i], lows[i], closes[i], volumes[i]] for i in range(200)]
             df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
             logger.info(f"Test modu: {symbol} {timeframe}")
         else:
             max_retries = 3
+            df = None
             for attempt in range(max_retries):
                 try:
                     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=max(150, LOOKBACK_ATR + 80))
@@ -176,11 +184,19 @@ async def check_signals(symbol, timeframe):
                     if attempt == max_retries - 1:
                         raise
                     await asyncio.sleep(5)
+                except (ccxt.BadSymbol, ccxt.BadRequest) as e:
+                    logger.warning(f"Skip {symbol} {timeframe}: {e.__class__.__name__} - {e}")
+                    return
+            if df is None or df.empty:
+                return
+
+        # İndikatörler
         df = calculate_indicators(df, timeframe)
         atr_value, avg_atr_ratio = get_atr_values(df, LOOKBACK_ATR)
         if not np.isfinite(atr_value) or not np.isfinite(avg_atr_ratio):
             return
-        last_row = df.iloc[-2]
+
+        last_row = df.iloc[-2]  # kapanmış mum
         key = f"{symbol}_{timeframe}"
         current_pos = signal_cache.get(key, {
             'signal': None, 'entry_price': None, 'sl_price': None, 'tp_price': None,
@@ -188,18 +204,21 @@ async def check_signals(symbol, timeframe):
             'trailing_activated': False, 'avg_atr_ratio': None, 'trailing_distance': None,
             'remaining_ratio': 1.0
         })
-        # Diverjans + kesişim (son 30 mum)
+
+        # Diverjans + kesişim
         lookback = LOOKBACK_DIVERGENCE
-        price_slice = df['close'].values[-lookback-1:-1]
-        ema_slice = df['rsi_ema'].values[-lookback-1:-1]
-        ema13_slice = df['ema13'].values[-lookback-1:-1]
-        sma34_slice = df['sma34'].values[-lookback-1:-1]
+        price_slice  = df['close'].values[-lookback-1:-1]
+        ema_slice    = df['rsi_ema'].values[-lookback-1:-1]
+        ema13_slice  = df['ema13'].values[-lookback-1:-1]
+        sma34_slice  = df['sma34'].values[-lookback-1:-1]
+
         price_highs, price_lows = find_local_extrema(price_slice)
         bullish = False
         bearish = False
-        ema_sma_crossover_buy = False
+        ema_sma_crossover_buy  = False
         ema_sma_crossover_sell = False
         min_distance = DIVERGENCE_MIN_DISTANCE
+
         if len(price_lows) >= 2:
             last_low = price_lows[-1]
             prev_low = price_lows[-2]
@@ -208,6 +227,7 @@ async def check_signals(symbol, timeframe):
                    ema_slice[last_low] > (ema_slice[prev_low] + EMA_THRESHOLD) and \
                    ema_slice[last_low] < RSI_LOW:
                     bullish = True
+
         if len(price_highs) >= 2:
             last_high = price_highs[-1]
             prev_high = price_highs[-2]
@@ -216,28 +236,32 @@ async def check_signals(symbol, timeframe):
                    ema_slice[last_high] < (ema_slice[prev_high] - EMA_THRESHOLD) and \
                    ema_slice[last_high] > RSI_HIGH:
                     bearish = True
+
+        # EMA13 / SMA34 kesişimi (kapanmış mum teyidi ve fiyat teyidi)
         for i in range(1, lookback):
             if ema13_slice[-i-1] <= sma34_slice[-i-1] and ema13_slice[-i] > sma34_slice[-i] and \
-               price_slice[-i] > sma34_slice[-i]:  # Crossover mumunda close teyidi
+               price_slice[-i] > sma34_slice[-i]:
                 ema_sma_crossover_buy = True
             if ema13_slice[-i-1] >= sma34_slice[-i-1] and ema13_slice[-i] < sma34_slice[-i] and \
-               price_slice[-i] < sma34_slice[-i]:  # Crossover mumunda close teyidi
+               price_slice[-i] < sma34_slice[-i]:
                 ema_sma_crossover_sell = True
+
         # MACD filtre (modlu)
-        macd_up = df['macd'].iloc[-2] > df['macd_signal'].iloc[-2]
+        macd_up   = df['macd'].iloc[-2] > df['macd_signal'].iloc[-2]
         macd_down = df['macd'].iloc[-2] < df['macd_signal'].iloc[-2]
-        hist_up = df['macd_hist'].iloc[-2] > 0
+        hist_up   = df['macd_hist'].iloc[-2] > 0
         hist_down = df['macd_hist'].iloc[-2] < 0
+
         if MACD_MODE == "and":
-            macd_ok_long = macd_up and hist_up
+            macd_ok_long  = macd_up   and hist_up
             macd_ok_short = macd_down and hist_down
         elif MACD_MODE == "regime":
-            macd_ok_long = macd_up
+            macd_ok_long  = macd_up
             macd_ok_short = macd_down
         else:  # "off"
-            macd_ok_long = True
+            macd_ok_long  = True
             macd_ok_short = True
-        # Log teşhis
+
         logger.info(
             f"{symbol} {timeframe} | "
             f"DivBull={bullish}, DivBear={bearish} | "
@@ -246,8 +270,10 @@ async def check_signals(symbol, timeframe):
             f"BUY_OK={'YES' if (ema_sma_crossover_buy and bullish and macd_ok_long) else 'no'} | "
             f"SELL_OK={'YES' if (ema_sma_crossover_sell and bearish and macd_ok_short) else 'no'}"
         )
-        buy_condition = ema_sma_crossover_buy and bullish and macd_ok_long
+
+        buy_condition  = ema_sma_crossover_buy  and bullish and macd_ok_long
         sell_condition = ema_sma_crossover_sell and bearish and macd_ok_short
+
         # Sinyal açılışı
         tz = pytz.timezone('Europe/Istanbul')
         if buy_condition and current_pos['signal'] != 'buy':
@@ -276,6 +302,7 @@ async def check_signals(symbol, timeframe):
             )
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
+
         elif sell_condition and current_pos['signal'] != 'sell':
             entry_price = float(last_row['close'])
             sl_price = entry_price + (SL_MULTIPLIER * atr_value + SL_BUFFER * atr_value)
@@ -302,16 +329,21 @@ async def check_signals(symbol, timeframe):
             )
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
+
         # Pozisyon yönetimi
         current_pos = signal_cache.get(key, current_pos)
+
         if current_pos['signal'] == 'buy':
             current_price = float(df.iloc[-1]['close'])
             atr_value, _ = get_atr_values(df, LOOKBACK_ATR)
             if not np.isfinite(atr_value):
                 return
+
             if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
                 current_pos['highest_price'] = current_price
+
             td = current_pos['trailing_distance']
+
             if (current_price >= current_pos['entry_price'] + (TRAILING_ACTIVATION * atr_value)
                 and not current_pos['trailing_activated']):
                 current_pos['trailing_activated'] = True
@@ -328,9 +360,11 @@ async def check_signals(symbol, timeframe):
                 )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Trailing Activated: {message}")
+
             if current_pos['trailing_activated']:
                 trailing_sl = current_pos['highest_price'] - (td * atr_value)
                 current_pos['sl_price'] = max(current_pos['sl_price'], trailing_sl)
+
             if current_pos['remaining_ratio'] == 1.0 and current_price >= current_pos['tp_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
                 current_pos['remaining_ratio'] = 0.5
@@ -346,6 +380,7 @@ async def check_signals(symbol, timeframe):
                 )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Partial TP: {message}")
+
             if current_price <= current_pos['sl_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
                 if profit_percent > 0:
@@ -368,20 +403,26 @@ async def check_signals(symbol, timeframe):
                     )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Exit: {message}")
+
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp_price': None,
                     'highest_price': None, 'lowest_price': None, 'trailing_activated': False,
                     'avg_atr_ratio': None, 'trailing_distance': None, 'remaining_ratio': 1.0
                 }
+
             signal_cache[key] = current_pos
+
         elif current_pos['signal'] == 'sell':
             current_price = float(df.iloc[-1]['close'])
             atr_value, _ = get_atr_values(df, LOOKBACK_ATR)
             if not np.isfinite(atr_value):
                 return
+
             if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
                 current_pos['lowest_price'] = current_price
+
             td = current_pos['trailing_distance']
+
             if (current_price <= current_pos['entry_price'] - (TRAILING_ACTIVATION * atr_value)
                 and not current_pos['trailing_activated']):
                 current_pos['trailing_activated'] = True
@@ -398,9 +439,11 @@ async def check_signals(symbol, timeframe):
                 )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Trailing Activated: {message}")
+
             if current_pos['trailing_activated']:
                 trailing_sl = current_pos['lowest_price'] + (td * atr_value)
                 current_pos['sl_price'] = min(current_pos['sl_price'], trailing_sl)
+
             if current_pos['remaining_ratio'] == 1.0 and current_price <= current_pos['tp_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
                 current_pos['remaining_ratio'] = 0.5
@@ -416,6 +459,7 @@ async def check_signals(symbol, timeframe):
                 )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Partial TP: {message}")
+
             if current_price >= current_pos['sl_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
                 if profit_percent > 0:
@@ -438,16 +482,20 @@ async def check_signals(symbol, timeframe):
                     )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
                 logger.info(f"Exit: {message}")
+
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp_price': None,
                     'highest_price': None, 'lowest_price': None, 'trailing_activated': False,
                     'avg_atr_ratio': None, 'trailing_distance': None, 'remaining_ratio': 1.0
                 }
-            signal_cache[key] = current_pos
-        except Exception as e:
-            logger.error(f"Hata ({symbol} {timeframe}): {str(e)}")
 
-# Main
+            signal_cache[key] = current_pos
+
+    except Exception as e:
+        logger.error(f"Hata ({symbol} {timeframe}): {str(e)}")
+        return
+
+# ================== Main ==================
 async def main():
     tz = pytz.timezone('Europe/Istanbul')
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + datetime.now(tz).strftime('%H:%M:%S'))
@@ -473,7 +521,7 @@ async def main():
         for i in range(0, len(tasks), batch_size):
             await asyncio.gather(*tasks[i:i+batch_size])
             await asyncio.sleep(1)
-        logger.info(f"Taramalar tamam, 5 dk bekle...")
+        logger.info("Taramalar tamam, 5 dk bekle...")
         await asyncio.sleep(300)
 
 if __name__ == "__main__":
