@@ -302,7 +302,7 @@ async def check_signals(symbol, timeframe):
             )
             await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
             logger.info(f"Sinyal: {message}")
-        # Pozisyon yönetimi (tam hali)
+        # Pozisyon yönetimi
         current_pos = signal_cache.get(key, current_pos)
         if current_pos['signal'] == 'buy':
             current_price = float(df.iloc[-1]['close'])
