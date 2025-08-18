@@ -26,8 +26,8 @@ SL_BUFFER = 0.3
 
 # Sinyal toggles
 MACD_MODE = "regime"  # "off" | "regime" | "and"
-LOOKBACK_DIVERGENCE = 30  # Güncellendi: 40'tan 30'a
-DIVERGENCE_MIN_DISTANCE = 5  # 5'te kaldı
+LOOKBACK_DIVERGENCE = 30
+DIVERGENCE_MIN_DISTANCE = 5
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -218,10 +218,10 @@ async def check_signals(symbol, timeframe):
                     bearish = True
         for i in range(1, lookback):
             if ema13_slice[-i-1] <= sma34_slice[-i-1] and ema13_slice[-i] > sma34_slice[-i] and \
-               df['close'].values[-i] > sma34_slice[-i]:
+               price_slice[-i] > sma34_slice[-i]:  # Crossover mumunda close teyidi
                 ema_sma_crossover_buy = True
             if ema13_slice[-i-1] >= sma34_slice[-i-1] and ema13_slice[-i] < sma34_slice[-i] and \
-               df['close'].values[-i] < sma34_slice[-i]:
+               price_slice[-i] < sma34_slice[-i]:  # Crossover mumunda close teyidi
                 ema_sma_crossover_sell = True
         # MACD filtre (modlu)
         macd_up = df['macd'].iloc[-2] > df['macd_signal'].iloc[-2]
@@ -248,17 +248,211 @@ async def check_signals(symbol, timeframe):
         )
         buy_condition = ema_sma_crossover_buy and bullish and macd_ok_long
         sell_condition = ema_sma_crossover_sell and bearish and macd_ok_short
-        # Sinyal açılışı ve pozisyon yönetimi (değişmedi, aynı kalıyor)
-        # ... (pozisyon yönetimi ve main aynı, tam dosya için kısalttım)
-    except Exception as e:
-        logger.error(f"Hata ({symbol} {timeframe}): {str(e)}")
+        # Sinyal açılışı
+        tz = pytz.timezone('Europe/Istanbul')
+        if buy_condition and current_pos['signal'] != 'buy':
+            entry_price = float(last_row['close'])
+            sl_price = entry_price - (SL_MULTIPLIER * atr_value + SL_BUFFER * atr_value)
+            tp_price = entry_price + (TP_MULTIPLIER * atr_value)
+            trailing_distance = (TRAILING_DISTANCE_HIGH_VOL if avg_atr_ratio > VOLATILITY_THRESHOLD else TRAILING_DISTANCE_BASE)
+            signal_cache[key] = {
+                'signal': 'buy',
+                'entry_price': entry_price,
+                'sl_price': sl_price,
+                'tp_price': tp_price,
+                'highest_price': entry_price,
+                'lowest_price': None,
+                'trailing_activated': False,
+                'avg_atr_ratio': avg_atr_ratio,
+                'trailing_distance': trailing_distance,
+                'remaining_ratio': 1.0
+            }
+            message = (
+                f"{symbol} {timeframe}: BUY (LONG) 🚀\n"
+                f"RSI_EMA: {last_row['rsi_ema']:.2f}\n"
+                f"Divergence: Bullish\n"
+                f"Entry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTP: {tp_price:.4f}\n"
+                f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+            )
+            await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+            logger.info(f"Sinyal: {message}")
+        elif sell_condition and current_pos['signal'] != 'sell':
+            entry_price = float(last_row['close'])
+            sl_price = entry_price + (SL_MULTIPLIER * atr_value + SL_BUFFER * atr_value)
+            tp_price = entry_price - (TP_MULTIPLIER * atr_value)
+            trailing_distance = (TRAILING_DISTANCE_HIGH_VOL if avg_atr_ratio > VOLATILITY_THRESHOLD else TRAILING_DISTANCE_BASE)
+            signal_cache[key] = {
+                'signal': 'sell',
+                'entry_price': entry_price,
+                'sl_price': sl_price,
+                'tp_price': tp_price,
+                'highest_price': None,
+                'lowest_price': entry_price,
+                'trailing_activated': False,
+                'avg_atr_ratio': avg_atr_ratio,
+                'trailing_distance': trailing_distance,
+                'remaining_ratio': 1.0
+            }
+            message = (
+                f"{symbol} {timeframe}: SELL (SHORT) 📉\n"
+                f"RSI_EMA: {last_row['rsi_ema']:.2f}\n"
+                f"Divergence: Bearish\n"
+                f"Entry: {entry_price:.4f}\nSL: {sl_price:.4f}\nTP: {tp_price:.4f}\n"
+                f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+            )
+            await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+            logger.info(f"Sinyal: {message}")
+        # Pozisyon yönetimi (tam hali)
+        current_pos = signal_cache.get(key, current_pos)
+        if current_pos['signal'] == 'buy':
+            current_price = float(df.iloc[-1]['close'])
+            atr_value, _ = get_atr_values(df, LOOKBACK_ATR)
+            if not np.isfinite(atr_value):
+                return
+            if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
+                current_pos['highest_price'] = current_price
+            td = current_pos['trailing_distance']
+            if (current_price >= current_pos['entry_price'] + (TRAILING_ACTIVATION * atr_value)
+                and not current_pos['trailing_activated']):
+                current_pos['trailing_activated'] = True
+                profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
+                message = (
+                    f"{symbol} {timeframe}: TRAILING ACTIVE 🚧\n"
+                    f"Current Price: {current_price:.4f}\n"
+                    f"Entry Price: {current_pos['entry_price']:.4f}\n"
+                    f"New SL: {current_pos['sl_price']:.4f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"Vol Ratio: {current_pos['avg_atr_ratio']:.4f}\n"
+                    f"TSL Distance: {td}\n"
+                    f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                )
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                logger.info(f"Trailing Activated: {message}")
+            if current_pos['trailing_activated']:
+                trailing_sl = current_pos['highest_price'] - (td * atr_value)
+                current_pos['sl_price'] = max(current_pos['sl_price'], trailing_sl)
+            if current_pos['remaining_ratio'] == 1.0 and current_price >= current_pos['tp_price']:
+                profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
+                current_pos['remaining_ratio'] = 0.5
+                current_pos['sl_price'] = current_pos['entry_price']
+                message = (
+                    f"{symbol} {timeframe}: PARAYI VURDUK 🚀\n"
+                    f"Current Price: {current_price:.4f}\n"
+                    f"TP Vuruldu: {current_pos['tp_price']:.4f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"%50 satıldı, kalan %50 TSL ile takip ediliyor\n"
+                    f"SL break-even'a çekildi: {current_pos['sl_price']:.4f}\n"
+                    f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                )
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                logger.info(f"Partial TP: {message}")
+            if current_price <= current_pos['sl_price']:
+                profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
+                if profit_percent > 0:
+                    message = (
+                        f"{symbol} {timeframe}: LONG 🚀\n"
+                        f"Price: {current_price:.4f}\n"
+                        f"RSI_EMA: {last_row['rsi_ema']:.2f}\n"
+                        f"Profit: {profit_percent:.2f}%\nPARAYI VURDUK 🚀\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                    )
+                else:
+                    message = (
+                        f"{symbol} {timeframe}: STOP LONG 📉\n"
+                        f"Price: {current_price:.4f}\n"
+                        f"RSI_EMA: {last_row['rsi_ema']:.2f}\n"
+                        f"Loss: {profit_percent:.2f}%\nSTOP 😞\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                    )
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                logger.info(f"Exit: {message}")
+                signal_cache[key] = {
+                    'signal': None, 'entry_price': None, 'sl_price': None, 'tp_price': None,
+                    'highest_price': None, 'lowest_price': None, 'trailing_activated': False,
+                    'avg_atr_ratio': None, 'trailing_distance': None, 'remaining_ratio': 1.0
+                }
+            signal_cache[key] = current_pos
+        elif current_pos['signal'] == 'sell':
+            current_price = float(df.iloc[-1]['close'])
+            atr_value, _ = get_atr_values(df, LOOKBACK_ATR)
+            if not np.isfinite(atr_value):
+                return
+            if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
+                current_pos['lowest_price'] = current_price
+            td = current_pos['trailing_distance']
+            if (current_price <= current_pos['entry_price'] - (TRAILING_ACTIVATION * atr_value)
+                and not current_pos['trailing_activated']):
+                current_pos['trailing_activated'] = True
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
+                message = (
+                    f"{symbol} {timeframe}: TRAILING ACTIVE 🚧\n"
+                    f"Current Price: {current_price:.4f}\n"
+                    f"Entry Price: {current_pos['entry_price']:.4f}\n"
+                    f"New SL: {current_pos['sl_price']:.4f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"Vol Ratio: {current_pos['avg_atr_ratio']:.4f}\n"
+                    f"TSL Distance: {td}\n"
+                    f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                )
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                logger.info(f"Trailing Activated: {message}")
+            if current_pos['trailing_activated']:
+                trailing_sl = current_pos['lowest_price'] + (td * atr_value)
+                current_pos['sl_price'] = min(current_pos['sl_price'], trailing_sl)
+            if current_pos['remaining_ratio'] == 1.0 and current_price <= current_pos['tp_price']:
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
+                current_pos['remaining_ratio'] = 0.5
+                current_pos['sl_price'] = current_pos['entry_price']
+                message = (
+                    f"{symbol} {timeframe}: PARAYI VURDUK 🚀\n"
+                    f"Current Price: {current_price:.4f}\n"
+                    f"TP Vuruldu: {current_pos['tp_price']:.4f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"%50 satıldı, kalan %50 TSL ile takip ediliyor\n"
+                    f"SL break-even'a çekildi: {current_pos['sl_price']:.4f}\n"
+                    f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                )
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                logger.info(f"Partial TP: {message}")
+            if current_price >= current_pos['sl_price']:
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
+                if profit_percent > 0:
+                    message = (
+                        f"{symbol} {timeframe}: SHORT 🚀\n"
+                        f"Price: {current_price:.4f}\n"
+                        f"RSI_EMA: {last_row['rsi_ema']:.2f}\n"
+                        f"Profit: {profit_percent:.2f}%\nPARAYI VURDUK 🚀\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                    )
+                else:
+                    message = (
+                        f"{symbol} {timeframe}: STOP SHORT 📉\n"
+                        f"Price: {current_price:.4f}\n"
+                        f"RSI_EMA: {last_row['rsi_ema']:.2f}\n"
+                        f"Loss: {profit_percent:.2f}%\nSTOP 😞\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {datetime.now(tz).strftime('%H:%M:%S')}"
+                    )
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                logger.info(f"Exit: {message}")
+                signal_cache[key] = {
+                    'signal': None, 'entry_price': None, 'sl_price': None, 'tp_price': None,
+                    'highest_price': None, 'lowest_price': None, 'trailing_activated': False,
+                    'avg_atr_ratio': None, 'trailing_distance': None, 'remaining_ratio': 1.0
+                }
+            signal_cache[key] = current_pos
+        except Exception as e:
+            logger.error(f"Hata ({symbol} {timeframe}): {str(e)}")
 
-# Main (değişmedi)
+# Main
 async def main():
     tz = pytz.timezone('Europe/Istanbul')
     await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı, saat: " + datetime.now(tz).strftime('%H:%M:%S'))
     timeframes = ['1h', '2h', '4h']
-    symbols = [ # listeyi aynı tut
+    symbols = [
         'ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'FARTCOINUSDT', '1000PEPEUSDT', 'ADAUSDT', 'SUIUSDT', 'WIFUSDT',
         'ENAUSDT', 'PENGUUSDT', '1000BONKUSDT', 'HYPEUSDT', 'AVAXUSDT', 'MOODENGUSDT', 'LINKUSDT', 'PUMPFUNUSDT', 'LTCUSDT', 'TRUMPUSDT',
         'AAVEUSDT', 'ARBUSDT', 'NEARUSDT', 'ONDOUSDT', 'POPCATUSDT', 'TONUSDT', 'OPUSDT', '1000FLOKIUSDT', 'SEIUSDT', 'HBARUSDT',
