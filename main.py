@@ -291,12 +291,14 @@ async def check_signals(symbol, timeframe):
             if current_pos['remaining_ratio'] == 1.0 and current_price >= current_pos['tp_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
                 current_pos['remaining_ratio'] = 0.5
+                current_pos['sl_price'] = current_pos['entry_price']  # SL'i entry'ye çek (break-even)
                 message = (
                     f"{symbol} {timeframe}: PARAYI VURDUK 🚀\n"
                     f"Current Price: {current_price:.4f}\n"
                     f"TP Vuruldu: {current_pos['tp_price']:.4f}\n"
                     f"Profit: {profit_percent:.2f}%\n"
                     f"%50 satıldı, kalan %50 TSL ile takip ediliyor\n"
+                    f"SL break-even'a çekildi: {current_pos['sl_price']:.4f}\n"
                     f"Time: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
@@ -364,12 +366,14 @@ async def check_signals(symbol, timeframe):
             if current_pos['remaining_ratio'] == 1.0 and current_price <= current_pos['tp_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
                 current_pos['remaining_ratio'] = 0.5
+                current_pos['sl_price'] = current_pos['entry_price']  # SL'i entry'ye çek (break-even)
                 message = (
                     f"{symbol} {timeframe}: PARAYI VURDUK 🚀\n"
                     f"Current Price: {current_price:.4f}\n"
                     f"TP Vuruldu: {current_pos['tp_price']:.4f}\n"
                     f"Profit: {profit_percent:.2f}%\n"
                     f"%50 satıldı, kalan %50 TSL ile takip ediliyor\n"
+                    f"SL break-even'a çekildi: {current_pos['sl_price']:.4f}\n"
                     f"Time: {datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
                 )
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
