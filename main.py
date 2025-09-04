@@ -423,7 +423,6 @@ async def scan_symbol(symbol):
                                  "tp1_price":tp1,"tp2_price":tp2,"atr2":atr2,
                                  "tsl_on":False,"highest":None,"lowest":c2,
                                  "tp1_hit":False,"tp2_hit":False,"remaining":1.0}
-
         # Mesaj
         names = [
             "4H Regime","4H MACD hist","4H ATR% band","4H ADX band",
@@ -432,18 +431,13 @@ async def scan_symbol(symbol):
         ]
         marks = ["✅" if b else "—" for b in meta['reasons']]
         score = meta['score_long'] if direction=='LONG' else meta['score_short']
-        msg = (
-            f"{symbol} {ENTRY_TF}: {direction} SİNYAL ✅ (Skor {score}/{len(marks)})
-"
-            f"Entry={c2:.6f}  SL={positions[symbol]['sl']:.6f}
-"
-            f"TP1={positions[symbol]['tp1_price']:.6f}  TP2={positions[symbol]['tp2_price']:.6f}
-"
-            f"ADX4H={meta['adx4']:.1f}  ATR%4H={meta['atrpct4']*100:.2f}%  RSI2H={meta['rsi2']:.1f}
-"
-            + "
-".join([f"- {n}: {m}" for n,m in zip(names,marks)])
-        )
+        detail_lines = "
+".join([f"- {n}: {m}" for n,m in zip(names, marks)])
+        msg = f"""{symbol} {ENTRY_TF}: {direction} SİNYAL ✅ (Skor {score}/{len(marks)})
+Entry={c2:.6f}  SL={positions[symbol]['sl']:.6f}
+TP1={positions[symbol]['tp1_price']:.6f}  TP2={positions[symbol]['tp2_price']:.6f}
+ADX4H={meta['adx4']:.1f}  ATR%4H={meta['atrpct4']*100:.2f}%  RSI2H={meta['rsi2']:.1f}
+{detail_lines}"""
         await tg_send(msg)
         logger.info(msg)
 
