@@ -324,11 +324,8 @@ async def manage_positions(symbol, df2_recent, atrpct4):
         pos['highest'] = max(pos['highest'], live_high, float(last_closed['high']))
         if (not pos['tsl_on']) and (live_close >= pos['entry'] + TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            await tg_send(
-    f"{symbol} 2H: LONG TSL aktif 🔧
-"
-    f"Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}"
-)
+            await tg_send(f"""{symbol} 2H: LONG TSL aktif 🔧
+Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}""")
         if pos['tsl_on']:
             tsl = pos['highest'] - k*atr2
             if tsl > pos['sl']:
@@ -337,37 +334,25 @@ async def manage_positions(symbol, df2_recent, atrpct4):
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            await tg_send(
-    f"{symbol} 2H: TP1 🎯
-"
-    f"TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}"
-)
+            await tg_send(f"""{symbol} 2H: TP1 🎯
+TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}""")
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_high >= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            await tg_send(
-    f"{symbol} 2H: TP2 🎯
-"
-    f"TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing"
-)
+            await tg_send(f"""{symbol} 2H: TP2 🎯
+TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing""")
         if live_low <= pos['sl']:
             pnl = (pos['sl'] - pos['entry'])/pos['entry']*100
-            await tg_send(
-    f"{symbol} 2H: LONG EXIT ✅
-"
-    f"Exit={pos['sl']:.6f}  PnL={pnl:.2f}%"
-)
+            await tg_send(f"""{symbol} 2H: LONG EXIT ✅
+Exit={pos['sl']:.6f}  PnL={pnl:.2f}%""")
             positions[symbol] = {"side": None}
 
     else:  # SHORT
         pos['lowest'] = min(pos['lowest'], live_low, float(last_closed['low']))
         if (not pos['tsl_on']) and (live_close <= pos['entry'] - TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            await tg_send(
-    f"{symbol} 2H: SHORT TSL aktif 🔧
-"
-    f"Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}"
-)
+            await tg_send(f"""{symbol} 2H: SHORT TSL aktif 🔧
+Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}""")
         if pos['tsl_on']:
             tsl = pos['lowest'] + k*atr2
             if tsl < pos['sl']:
@@ -376,29 +361,21 @@ async def manage_positions(symbol, df2_recent, atrpct4):
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            await tg_send(
-    f"{symbol} 2H: TP1 🎯
-"
-    f"TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}"
-)
+            await tg_send(f"""{symbol} 2H: TP1 🎯
+TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}""")
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_low <= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            await tg_send(
-    f"{symbol} 2H: TP2 🎯
-"
-    f"TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing"
-)
+            await tg_send(f"""{symbol} 2H: TP2 🎯
+TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing""")
         if live_high >= pos['sl']:
             pnl = (pos['entry'] - pos['sl'])/pos['entry']*100
-            await tg_send(
-    f"{symbol} 2H: SHORT EXIT ✅
-"
-    f"Exit={pos['sl']:.6f}  PnL={pnl:.2f}%"
-)
+            await tg_send(f"""{symbol} 2H: SHORT EXIT ✅
+Exit={pos['sl']:.6f}  PnL={pnl:.2f}%""")
             positions[symbol] = {"side": None}
 
 # ================== SİMBOL TARAYICI ==================
+
 async def scan_symbol(symbol):
     try:
         df4 = pd.DataFrame(safe_fetch_ohlcv(symbol, REGIME_TF, LIMIT_4H),
