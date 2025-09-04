@@ -12,7 +12,7 @@ import signal as os_signal
 import time
 
 """
-Bybit High-WR Scanner (4H regime + 2H entry) – v1.2
+Bybit High-WR Scanner (4H regime + 2H entry) – v1.2.1
 - High-WR preset (seçici parametreler)
 - 2H mum teyidi + likidite filtresi
 - Bybit USDT linear perp sembollerini otomatik tarar
@@ -20,6 +20,7 @@ Bybit High-WR Scanner (4H regime + 2H entry) – v1.2
 - Telegram bildirimleri, cooldown, basit hata toleransı
 
 Not: BOT_TOKEN ve CHAT_ID'i çevre değişkenlerinden okuyun.
+Güncelleme v1.2.1: DIV_LOOKBACK sabiti eklendi; likidite median'ına min_periods=1 eklendi.
 """
 
 # ================== KULLANICI AYARLARI ==================
@@ -45,7 +46,10 @@ ADX_MAX_4H = 35        # 40 -> 35
 ATRPCT_MIN_4H = 0.012  # %1.0 -> %1.2
 ATRPCT_MAX_4H = 0.050  # %6.0 -> %5.0
 PULLBACK_TOL_ATR = 0.08 # 0.10 -> 0.08
-DIV_MIN_DISTANCE = 6     # 5 -> 6
+
+# Divergence penceresi
+DIV_LOOKBACK = 30       # hidden divergence için bakılan pencere (bar)
+DIV_MIN_DISTANCE = 6    # iki ekstrem arası min mesafe
 
 # SL/TP/Trailing
 SL_ATR_MULT        = 1.6
@@ -253,12 +257,13 @@ def evaluate_signal(df4, df2):
     di_ok_long     = (pdi2[-2] > mdi2[-2]) and (adx2[-2] >= DI_ADX_MIN_2H)
     di_ok_short    = (mdi2[-2] > pdi2[-2]) and (adx2[-2] >= DI_ADX_MIN_2H)
 
-    # --- YENİ: 2H mum teyidi + likidite filtresi ---
+    # --- 2H mum teyidi + likidite filtresi ---
     confirm_long  = (df2['close'].iloc[-2] > ema20_2[-2]) and (df2['close'].iloc[-2] > df2['open'].iloc[-2])
     confirm_short = (df2['close'].iloc[-2] < ema20_2[-2]) and (df2['close'].iloc[-2] < df2['open'].iloc[-2])
 
     dollar_vol2 = (df2['close'] * df2['volume']).astype(float)
-    liquidity_ok = bool(dollar_vol2.iloc[-2] >= dollar_vol2.rolling(30).median().iloc[-2])
+    med = dollar_vol2.rolling(30, min_periods=1).median()
+    liquidity_ok = bool(dollar_vol2.iloc[-2] >= med.iloc[-2])
 
     long_crit = [
         regime_long, macd_ok_long_4h, atr_ok_4h, adx_ok_4h,
@@ -319,7 +324,8 @@ async def manage_positions(symbol, df2_recent, atrpct4):
         pos['highest'] = max(pos['highest'], live_high, float(last_closed['high']))
         if (not pos['tsl_on']) and (live_close >= pos['entry'] + TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            await tg_send(f"{symbol} 2H: LONG TSL aktif 🔧\nEntry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}")
+            await tg_send(f"{symbol} 2H: LONG TSL aktif 🔧
+Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}")
         if pos['tsl_on']:
             tsl = pos['highest'] - k*atr2
             if tsl > pos['sl']:
@@ -328,21 +334,25 @@ async def manage_positions(symbol, df2_recent, atrpct4):
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            await tg_send(f"{symbol} 2H: TP1 🎯\nTP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}")
+            await tg_send(f"{symbol} 2H: TP1 🎯
+TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}")
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_high >= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            await tg_send(f"{symbol} 2H: TP2 🎯\nTP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing")
+            await tg_send(f"{symbol} 2H: TP2 🎯
+TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing")
         if live_low <= pos['sl']:
             pnl = (pos['sl'] - pos['entry'])/pos['entry']*100
-            await tg_send(f"{symbol} 2H: LONG EXIT ✅\nExit={pos['sl']:.6f}  PnL={pnl:.2f}%")
+            await tg_send(f"{symbol} 2H: LONG EXIT ✅
+Exit={pos['sl']:.6f}  PnL={pnl:.2f}%")
             positions[symbol] = {"side": None}
 
     else:  # SHORT
         pos['lowest'] = min(pos['lowest'], live_low, float(last_closed['low']))
         if (not pos['tsl_on']) and (live_close <= pos['entry'] - TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            await tg_send(f"{symbol} 2H: SHORT TSL aktif 🔧\nEntry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}")
+            await tg_send(f"{symbol} 2H: SHORT TSL aktif 🔧
+Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}")
         if pos['tsl_on']:
             tsl = pos['lowest'] + k*atr2
             if tsl < pos['sl']:
@@ -351,14 +361,17 @@ async def manage_positions(symbol, df2_recent, atrpct4):
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            await tg_send(f"{symbol} 2H: TP1 🎯\nTP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}")
+            await tg_send(f"{symbol} 2H: TP1 🎯
+TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}")
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_low <= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            await tg_send(f"{symbol} 2H: TP2 🎯\nTP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing")
+            await tg_send(f"{symbol} 2H: TP2 🎯
+TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing")
         if live_high >= pos['sl']:
             pnl = (pos['entry'] - pos['sl'])/pos['entry']*100
-            await tg_send(f"{symbol} 2H: SHORT EXIT ✅\nExit={pos['sl']:.6f}  PnL={pnl:.2f}%")
+            await tg_send(f"{symbol} 2H: SHORT EXIT ✅
+Exit={pos['sl']:.6f}  PnL={pnl:.2f}%")
             positions[symbol] = {"side": None}
 
 # ================== SİMBOL TARAYICI ==================
@@ -419,11 +432,16 @@ async def scan_symbol(symbol):
         marks = ["✅" if b else "—" for b in meta['reasons']]
         score = meta['score_long'] if direction=='LONG' else meta['score_short']
         msg = (
-            f"{symbol} {ENTRY_TF}: {direction} SİNYAL ✅ (Skor {score}/{len(marks)})\n"
-            f"Entry={c2:.6f}  SL={positions[symbol]['sl']:.6f}\n"
-            f"TP1={positions[symbol]['tp1_price']:.6f}  TP2={positions[symbol]['tp2_price']:.6f}\n"
-            f"ADX4H={meta['adx4']:.1f}  ATR%4H={meta['atrpct4']*100:.2f}%  RSI2H={meta['rsi2']:.1f}\n"
-            + "\n".join([f"- {n}: {m}" for n,m in zip(names,marks)])
+            f"{symbol} {ENTRY_TF}: {direction} SİNYAL ✅ (Skor {score}/{len(marks)})
+"
+            f"Entry={c2:.6f}  SL={positions[symbol]['sl']:.6f}
+"
+            f"TP1={positions[symbol]['tp1_price']:.6f}  TP2={positions[symbol]['tp2_price']:.6f}
+"
+            f"ADX4H={meta['adx4']:.1f}  ATR%4H={meta['atrpct4']*100:.2f}%  RSI2H={meta['rsi2']:.1f}
+"
+            + "
+".join([f"- {n}: {m}" for n,m in zip(names,marks)])
         )
         await tg_send(msg)
         logger.info(msg)
