@@ -46,6 +46,7 @@ ADX_MAX_4H = 35        # 40 -> 35
 ATRPCT_MIN_4H = 0.012  # %1.0 -> %1.2
 ATRPCT_MAX_4H = 0.050  # %6.0 -> %5.0
 PULLBACK_TOL_ATR = 0.08 # 0.10 -> 0.08
+DI_ADX_MIN_2H = 18    # 2H DI/ADX için minimum ADX eşiği
 
 # Divergence penceresi
 DIV_LOOKBACK = 30       # hidden divergence için bakılan pencere (bar)
@@ -430,16 +431,19 @@ async def scan_symbol(symbol):
             "2H Candle Confirm","Liquidity >= 30-bar median"
         ]
         marks = ["✅" if b else "—" for b in meta['reasons']]
-        score = meta['score_long'] if direction=='LONG' else meta['score_short']
-        detail_lines = "
-".join([f"- {n}: {m}" for n,m in zip(names, marks)])
-        msg = f"""{symbol} {ENTRY_TF}: {direction} SİNYAL ✅ (Skor {score}/{len(marks)})
+score = meta['score_long'] if direction=='LONG' else meta['score_short']
+lines = []
+for n, m in zip(names, marks):
+    lines.append(f"- {n}: {m}")
+detail_lines = "
+".join(lines)
+msg = f"""{symbol} {ENTRY_TF}: {direction} SİNYAL ✅ (Skor {score}/{len(marks)})
 Entry={c2:.6f}  SL={positions[symbol]['sl']:.6f}
 TP1={positions[symbol]['tp1_price']:.6f}  TP2={positions[symbol]['tp2_price']:.6f}
 ADX4H={meta['adx4']:.1f}  ATR%4H={meta['atrpct4']*100:.2f}%  RSI2H={meta['rsi2']:.1f}
 {detail_lines}"""
-        await tg_send(msg)
-        logger.info(msg)
+await tg_send(msg)
+logger.info(msg)
 
     except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
         logger.warning(f"{symbol}: network/timeout {e}")
