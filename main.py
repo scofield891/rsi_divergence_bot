@@ -14,23 +14,25 @@ import signal as os_signal
 import time
 
 """
-Bybit High-WR Scanner (4H regime + 2H entry) – v1.7.0
+Bybit High-WR Scanner (4H regime + 2H entry) – v1.8.1
 
-Güncel değişiklik:
-- 2H EMA13/SMA34 kesişimi son 10 kapalı mum içinde gerçekleşmiş olmalı (hard gate).
-- Kesişimin yönü: long için EMA13↑SMA34, short için EMA13↓SMA34.
-- Fiyat konumu: long'ta kapanış SMA34 üstü, short'ta SMA34 altı.
+Güncellemeler:
+- Likidite filtresi: LIQ_ROLL_BARS=60, LIQ_QUANTILE=0.70 (daha seçici)
+- ATR_px: doğrudan Wilder ATR (px) kullanımı (atr_px = atr2)
+- 'Sinyal yok' loguna ADX4H ve ATR%4H eklendi, meta’ya 4H hard-cross bayrakları kondu
+- 4H EMA13/SMA34 cross hard-gate (son N kapalı 4H mum içinde)
+- SCORE_MIN=8, yüksek WR amaçlı
 
-Diğerleri:
-- SCORE_MIN=8
-- RSI50 (long ≥50, short ≤50)
-- SL=1.8×ATR%, TP1=2.0×ATR%, TP2=3.5×ATR%
-- TP1 %30 + BE, TP2 %40, kalan %30 TSL
-- Wilder ADX/DI, likidite & body filtreleri
-- Telegram queue + rate limit
+Pozisyon yönetimi:
+- SL = 1.8 × ATR_px
+- TP1 = 2.0 × ATR_px (vurunca %30 boz + BE)
+- TP2 = 3.5 × ATR_px (vurunca %40 boz)
+- Kalan %30 TSL (TSL aktivasyon 1.0 × ATR_px; low-vol k=2.0 / high-vol k=2.5)
+
+Not: BOT_TOKEN ve CHAT_ID sabit bırakıldı (senin isteğin).
 """
 
-# ================== KULLANICI AYARLARI ==================
+# ================== SABİTLER / AYARLAR ==================
 BOT_TOKEN = "7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY"
 CHAT_ID = "-1002755412514"
 TZ = 'Europe/Istanbul'
@@ -56,7 +58,7 @@ DI_ADX_MIN_2H = 18
 DIV_LOOKBACK = 30
 DIV_MIN_DISTANCE = 6
 
-# SL/TP/Trail (ATR% bazlı)
+# SL/TP/Trail (ATR_px bazlı)
 SL_ATR_MULT        = 1.8
 TP1_ATR_MULT       = 2.0
 TP2_ATR_MULT       = 3.5
@@ -66,8 +68,10 @@ TSL_K_HIGHVOL = 2.5
 VOL_SPLIT_ATRPCT = 0.030  # %3
 
 BODY_ATR_MULT = 0.5
+
+# Likidite filtresi — daha seçici
 LIQ_ROLL_BARS = 60
-LIQ_QUANTILE  = 0.60
+LIQ_QUANTILE  = 0.70
 
 TP1_CLOSE_RATIO   = 0.30
 TP2_CLOSE_RATIO   = 0.40
@@ -77,8 +81,8 @@ LIMIT_2H = 520
 
 TELEGRAM_MAX_MSG_PER_SEC = 3.0
 
-# EMA13/SMA34 kesişim lookback
-CROSS_LOOKBACK = 10  # son 10 kapalı mum içinde
+# EMA13/SMA34 kesişim lookback (4H’te)
+CROSS_LOOKBACK = 10  # son 10 kapalı 4H mum içinde
 
 # ================== LOG ==================
 logger = logging.getLogger("scanner")
@@ -240,6 +244,18 @@ def in_pullback_zone(close_val, ema20, ema50, atr_val, tol_atr=0.10, direction='
     else:
         return (close_val <  ema20) and (lo <= close_val <= hi)
 
+def crossed_up_recent(ema_arr, sma_arr, lb):
+    for k in range(2, lb + 2):
+        if ema_arr[-k-1] <= sma_arr[-k-1] and ema_arr[-k] > sma_arr[-k]:
+            return True
+    return False
+
+def crossed_down_recent(ema_arr, sma_arr, lb):
+    for k in range(2, lb + 2):
+        if ema_arr[-k-1] >= sma_arr[-k-1] and ema_arr[-k] < sma_arr[-k]:
+            return True
+    return False
+
 # ================== SEMBOLLER ==================
 def all_bybit_linear_usdt_symbols(exchange):
     markets = exchange.load_markets()
@@ -268,25 +284,13 @@ positions        = {}  # { symbol: {...} }
 def vol_k_from_atr_pct(atrpct):
     return TSL_K_LOWVOL if atrpct <= VOL_SPLIT_ATRPCT else TSL_K_HIGHVOL
 
-# ======= EMA13/SMA34 KESİŞİM “SON N BAR” =======
-def crossed_up_recent(ema_arr, sma_arr, lb):
-    # son lb kapalı barda (t=-2 ... -lb-1) herhangi birinde up-cross
-    for k in range(2, lb + 2):
-        if ema_arr[-k-1] <= sma_arr[-k-1] and ema_arr[-k] > sma_arr[-k]:
-            return True
-    return False
-
-def crossed_down_recent(ema_arr, sma_arr, lb):
-    for k in range(2, lb + 2):
-        if ema_arr[-k-1] >= sma_arr[-k-1] and ema_arr[-k] < sma_arr[-k]:
-            return True
-    return False
-
 # ================== SİNYAL DEĞERLENDİRME ==================
 def evaluate_signal(df4, df2):
-    # --- 4H rejim ---
+    # --- 4H rejim + 4H cross gate ---
     closes4 = df4['close'].values.astype(np.float64)
     macd4, sig4, hist4 = macd_lines(closes4, 12, 26, 9)
+    ema13_4 = ema(closes4, 13)
+    sma34_4 = sma(closes4, 34)
     ema50_4  = ema(closes4, 50)
     ema200_4 = ema(closes4, 200)
     atr4, pdi4, mdi4, adx4 = compute_atr_dm_di_adx(df4, 14)
@@ -302,13 +306,16 @@ def evaluate_signal(df4, df2):
     atr_ok_4h = (ATRPCT_MIN_4H <= atrpct4 <= ATRPCT_MAX_4H)
     adx_ok_4h = (ADX_MIN_4H <= adx4[-2] <= ADX_MAX_4H)
 
-    # --- 2H giriş ---
+    cross_long_recent_4h  = crossed_up_recent(ema13_4,  sma34_4, CROSS_LOOKBACK)
+    cross_short_recent_4h = crossed_down_recent(ema13_4, sma34_4, CROSS_LOOKBACK)
+    hard_long_4h  = cross_long_recent_4h  and (c4 > sma34_4[-2])
+    hard_short_4h = cross_short_recent_4h and (c4 < sma34_4[-2])
+
+    # --- 2H giriş (pullback/trigger/likidite) ---
     closes2 = df2['close'].values.astype(np.float64)
     opens2  = df2['open'].values.astype(np.float64)
     rsi2    = rsi(closes2, 14)
     rsi_ema9= ema(rsi2, 9)
-    ema13_2 = ema(closes2, 13)
-    sma34_2 = sma(closes2, 34)
     ema20_2 = ema(closes2, 20)
     ema50_2 = ema(closes2, 50)
     atr2, pdi2, mdi2, adx2 = compute_atr_dm_di_adx(df2, 14)
@@ -317,13 +324,6 @@ def evaluate_signal(df4, df2):
     o2        = opens2[-2]
     atr2_last = atr2[-2]
     atrpct2   = atr2_last / max(c2, 1e-9)
-
-    # ZORUNLU koşul: son 10 kapalı mum içinde kesişim + fiyat konumu
-    cross_long_recent  = crossed_up_recent(ema13_2, sma34_2, CROSS_LOOKBACK)
-    cross_short_recent = crossed_down_recent(ema13_2, sma34_2, CROSS_LOOKBACK)
-
-    hard_long  = cross_long_recent  and (c2 > sma34_2[-2])
-    hard_short = cross_short_recent and (c2 < sma34_2[-2])
 
     bull_hidden, bear_hidden = hidden_divergence(closes2, rsi2, lookback=DIV_LOOKBACK, min_distance=DIV_MIN_DISTANCE, order=3)
     pullback_long  = in_pullback_zone(c2, ema20_2[-2], ema50_2[-2], atr2_last, PULLBACK_TOL_ATR, 'long')
@@ -341,21 +341,23 @@ def evaluate_signal(df4, df2):
     confirm_long  = (c2 > ema20_2[-2]) and (c2 > o2)
     confirm_short = (c2 < ema20_2[-2]) and (c2 < o2)
     body_size     = abs(c2 - o2)
-    body_ok       = (body_size >= BODY_ATR_MULT * (atrpct2 * c2))
+    # Body filtresi ATR_px bazlı: ATR_px = atr2_last (px)
+    body_ok       = (body_size >= BODY_ATR_MULT * atr2_last)
 
+    # Likidite filtresi (daha seçici: Q=0.70, 60 bar)
     dollar_vol2 = (df2['close'] * df2['volume']).astype(float)
     q = dollar_vol2.rolling(LIQ_ROLL_BARS, min_periods=max(10, LIQ_ROLL_BARS//2)).quantile(LIQ_QUANTILE)
     liquidity_ok = bool(dollar_vol2.iloc[-2] >= q.iloc[-2])
 
     long_crit = [
         regime_long, macd_ok_long_4h, atr_ok_4h, adx_ok_4h,
-        hard_long,            # <— EMA13/SMA34 cross ≤10 bar + price above SMA34
+        hard_long_4h,
         pullback_long, bull_hidden, rsi50_long, di_ok_long, trigger_long,
         confirm_long, body_ok, liquidity_ok
     ]
     short_crit = [
         regime_short, macd_ok_short_4h, atr_ok_4h, adx_ok_4h,
-        hard_short,           # <— EMA13/SMA34 cross ≤10 bar + price below SMA34
+        hard_short_4h,
         pullback_short, bear_hidden, rsi50_short, di_ok_short, trigger_short,
         confirm_short, body_ok, liquidity_ok
     ]
@@ -365,18 +367,22 @@ def evaluate_signal(df4, df2):
 
     direction = None
     reasons   = None
-    # ZORUNLU: hard_long/hard_short sağlanmalı
-    if score_long >= SCORE_MIN and score_long >= score_short and regime_long and hard_long:
+    if score_long >= SCORE_MIN and score_long >= score_short and regime_long and hard_long_4h:
         direction, reasons = 'LONG',  long_crit
-    elif score_short >= SCORE_MIN and score_short >  score_long and regime_short and hard_short:
+    elif score_short >= SCORE_MIN and score_short > score_long and regime_short and hard_short_4h:
         direction, reasons = 'SHORT', short_crit
 
     meta = {
-        "c2": c2, "o2": o2, "atr2": atr2_last, "atrpct2": atrpct2,
-        "atrpct4": atrpct4, "adx4": adx4[-2], "rsi2": rsi2[-2], "adx2": adx2[-2],
+        "c2": c2, "o2": o2,
+        "atr2": atr2_last,         # ATR_px
+        "atrpct2": atrpct2,
+        "atrpct4": atrpct4,
+        "adx4": adx4[-2], "rsi2": rsi2[-2], "adx2": adx2[-2],
         "+di2": pdi2[-2], "-di2": mdi2[-2],
         "score_long": score_long, "score_short": score_short,
-        "reasons": reasons
+        "reasons": reasons,
+        "hard_long_4h": hard_long_4h,
+        "hard_short_4h": hard_short_4h
     }
     return direction, meta
 
@@ -386,9 +392,6 @@ def last_swing(df2, direction):
         return float(df2['low'].iloc[-11:-1].min())
     else:
         return float(df2['high'].iloc[-11:-1].max())
-
-def vol_k_from_atr_pct(atrpct):
-    return TSL_K_LOWVOL if atrpct <= VOL_SPLIT_ATRPCT else TSL_K_HIGHVOL
 
 # ================== YÖNETİM ==================
 async def manage_positions(symbol, df2_recent, atrpct4):
@@ -400,8 +403,8 @@ async def manage_positions(symbol, df2_recent, atrpct4):
     live_bar    = df2_recent.iloc[-1]
     live_high = float(live_bar['high']); live_low = float(live_bar['low']); live_close = float(live_bar['close'])
 
-    k = vol_k_from_atr_pct(atrpct4)
-    atr_px = pos.get('atr_px', pos['atr2'])  # ATR px adımı
+    k = TSL_K_LOWVOL if atrpct4 <= VOL_SPLIT_ATRPCT else TSL_K_HIGHVOL
+    atr_px = pos['atr_px']  # artık doğrudan ATR (px)
 
     def J(*parts): return "\n".join(parts)
 
@@ -498,14 +501,18 @@ async def scan_symbol(symbol):
 
         direction, meta = evaluate_signal(df4, df2)
 
-        # Mevcut pozisyon varsa yönet
+        # Mevcut pozisyonları yönet
         await manage_positions(symbol, df2.iloc[-2:].copy(), meta['atrpct4'])
 
         if not direction:
-            logger.info(f"{symbol}: sinyal yok | L={meta['score_long']} S={meta['score_short']}")
+            logger.info(
+                f"{symbol}: sinyal yok | L={meta['score_long']} S={meta['score_short']} "
+                f"| ADX4H={meta['adx4']:.1f} ATR%4H={meta['atrpct4']*100:.2f}% "
+                f"| 4Hcross(L/S)={int(meta['hard_long_4h'])}/{int(meta['hard_short_4h'])}"
+            )
             return
 
-        # Cooldown
+        # Cooldown (sembol-bazlı)
         key = symbol
         tz = pytz.timezone(TZ); now = datetime.now(tz)
         if key in last_signal_time and (now - last_signal_time[key]) < timedelta(minutes=COOLDOWN_MINUTES):
@@ -513,12 +520,11 @@ async def scan_symbol(symbol):
             return
         last_signal_time[key] = now
 
-        # ATR% -> fiyat adımı
-        c2        = meta['c2']
-        atr2      = meta['atr2']
-        atrpct2   = meta['atrpct2']
-        atrpct4   = meta['atrpct4']
-        atr_px    = atrpct2 * c2
+        # ATR_px: doğrudan atr2 (px)
+        c2      = meta['c2']
+        atr2    = meta['atr2']
+        atrpct4 = meta['atrpct4']
+        atr_px  = atr2
 
         # SL/TP
         if direction == 'LONG':
@@ -529,7 +535,7 @@ async def scan_symbol(symbol):
             positions[symbol] = {
                 "side":"LONG","entry":c2,"sl":sl,
                 "tp1_price":tp1,"tp2_price":tp2,
-                "atr2":atr2,"atr_pct":atrpct2,"atr_px":atr_px,
+                "atr2":atr2,"atr_px":atr_px,
                 "tsl_on":False,"highest":c2,"lowest":None,
                 "tp1_hit":False,"tp2_hit":False,"remaining":1.0
             }
@@ -541,7 +547,7 @@ async def scan_symbol(symbol):
             positions[symbol] = {
                 "side":"SHORT","entry":c2,"sl":sl,
                 "tp1_price":tp1,"tp2_price":tp2,
-                "atr2":atr2,"atr_pct":atrpct2,"atr_px":atr_px,
+                "atr2":atr2,"atr_px":atr_px,
                 "tsl_on":False,"highest":None,"lowest":c2,
                 "tp1_hit":False,"tp2_hit":False,"remaining":1.0
             }
@@ -549,11 +555,12 @@ async def scan_symbol(symbol):
         # Telegram mesajı
         names = [
             "4H Regime","4H MACD hist","4H ATR% band","4H ADX band",
-            f"2H EMA13/SMA34 Cross≤{CROSS_LOOKBACK}","2H Pullback","2H Hidden Div","2H RSI50",
+            f"4H EMA13/SMA34 Cross≤{CROSS_LOOKBACK}",
+            "2H Pullback","2H Hidden Div","2H RSI50",
             "2H DI/ADX","2H RSI~EMA(9) trig","2H Candle Confirm","2H Body>=0.5*ATR",
             f"Liquidity >= Q{int(LIQ_QUANTILE*100)}"
         ]
-        marks = ["✅" if b else "—" for b in meta['reasons']]
+        marks = ["✅" if b else "—" for b in (meta['reasons'] or [])]
         score = meta['score_long'] if direction=='LONG' else meta['score_short']
         detail_lines = "\n".join(f"- {n}: {m}" for n, m in zip(names, marks))
 
@@ -591,9 +598,9 @@ def backtest_symbol(symbol, bars_2h=800):
             direction, meta = evaluate_signal(df4w, df2w)
             if not direction:
                 continue
-            entry = meta['c2']; atr2 = meta['atr2']
-            tp1 = entry + TP1_ATR_MULT*atr2 if direction=='LONG' else entry - TP1_ATR_MULT*atr2
-            tp2 = entry + TP2_ATR_MULT*atr2 if direction=='LONG' else entry - TP2_ATR_MULT*atr2
+            entry = meta['c2']; atr_px = meta['atr2']
+            tp1 = entry + TP1_ATR_MULT*atr_px if direction=='LONG' else entry - TP1_ATR_MULT*atr_px
+            tp2 = entry + TP2_ATR_MULT*atr_px if direction=='LONG' else entry - TP2_ATR_MULT*atr_px
             end_j = min(i+40, len(df2)-1)
             ok = False
             for j in range(i+1, end_j+1):
@@ -613,7 +620,7 @@ def backtest_symbol(symbol, bars_2h=800):
 async def main():
     tz = pytz.timezone(TZ)
 
-    # Telegram worker'ı önce başlat
+    # Telegram worker
     worker_task = asyncio.create_task(telegram_worker())
 
     start_msg = "Scanner başladı: " + datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
