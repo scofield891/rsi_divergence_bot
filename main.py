@@ -11,7 +11,7 @@ from telegram import Bot
 import signal as os_signal
 import time
 
-# Bybit High-WR Scanner (4H regime + 2H entry) – v1.3.0
+# Bybit High-WR Scanner (4H regime + 2H entry) – v1.3.2
 # - High-WR preset (seçici parametreler)
 # - 2H mum teyidi + likidite filtresi
 # - Bybit USDT linear perp sembollerini otomatik tarar
@@ -75,12 +75,19 @@ logging.getLogger('httpx').setLevel(logging.ERROR)
 exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}, 'timeout': 60000})
 telegram_bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 
+# Güvenli satır birleştirme
+NL = "
+"
+
 async def tg_send(text: str):
     if not telegram_bot:
         logger.info(f"TELEGRAM(MOCK): {text}")
         return
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, telegram_bot.send_message, CHAT_ID, text)
+
+async def tg_send_lines(*parts):
+    await tg_send(NL.join(parts))
 
 # ================== İNDİKATÖR FONKSİYONLARI ==================
 def ema(arr, n):
@@ -147,6 +154,7 @@ def compute_atr_dm_di_adx(df, period=14):
         p_dm_s[i] = p_dm_s[i-1] - (p_dm_s[i-1]/period) + plus_dm[i]
         m_dm_s[i] = m_dm_s[i-1] - (m_dm_s[i-1]/period) + minus_dm[i]
 
+    # DI: 100 * (smoothed_DM/period) / ATR  (ATR zaten period'e bölünmüş)
     plus_di  = 100.0 * (p_dm_s / np.maximum(atr,1e-9)) / period
     minus_di = 100.0 * (m_dm_s / np.maximum(atr,1e-9)) / period
 
@@ -321,11 +329,10 @@ async def manage_positions(symbol, df2_recent, atrpct4):
         pos['highest'] = max(pos['highest'], live_high, float(last_closed['high']))
         if (not pos['tsl_on']) and (live_close >= pos['entry'] + TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: LONG TSL aktif 🔧",
                 f"Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}",
-            ]))
+            )
         if pos['tsl_on']:
             tsl = pos['highest'] - k*atr2
             if tsl > pos['sl']:
@@ -334,37 +341,33 @@ async def manage_positions(symbol, df2_recent, atrpct4):
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: TP1 🎯",
                 f"TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}",
-            ]))
+            )
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_high >= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: TP2 🎯",
                 f"TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing",
-            ]))
+            )
         if live_low <= pos['sl']:
             pnl = (pos['sl'] - pos['entry'])/pos['entry']*100
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: LONG EXIT ✅",
                 f"Exit={pos['sl']:.6f}  PnL={pnl:.2f}%",
-            ]))
+            )
             positions[symbol] = {"side": None}
 
     else:  # SHORT
         pos['lowest'] = min(pos['lowest'], live_low, float(last_closed['low']))
         if (not pos['tsl_on']) and (live_close <= pos['entry'] - TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: SHORT TSL aktif 🔧",
                 f"Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}",
-            ]))
+            )
         if pos['tsl_on']:
             tsl = pos['lowest'] + k*atr2
             if tsl < pos['sl']:
@@ -373,26 +376,23 @@ async def manage_positions(symbol, df2_recent, atrpct4):
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: TP1 🎯",
                 f"TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}",
-            ]))
+            )
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_low <= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: TP2 🎯",
                 f"TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing",
-            ]))
+            )
         if live_high >= pos['sl']:
             pnl = (pos['entry'] - pos['sl'])/pos['entry']*100
-            await tg_send("
-".join([
+            await tg_send_lines(
                 f"{symbol} 2H: SHORT EXIT ✅",
                 f"Exit={pos['sl']:.6f}  PnL={pnl:.2f}%",
-            ]))
+            )
             positions[symbol] = {"side": None}
 
 # ================== SİMBOL TARAYICI ==================
@@ -444,7 +444,7 @@ async def scan_symbol(symbol):
                                  "tsl_on":False,"highest":None,"lowest":c2,
                                  "tp1_hit":False,"tp2_hit":False,"remaining":1.0}
 
-        # Mesaj (güvenli, tek satırlı f-stringler)
+        # Mesaj (join ile güvenli)
         names = [
             "4H Regime","4H MACD hist","4H ATR% band","4H ADX band",
             "2H Pullback","2H Hidden Div","2H RSI50","2H DI/ADX","2H RSI~EMA(9) trig",
@@ -453,8 +453,7 @@ async def scan_symbol(symbol):
         marks = ["✅" if b else "—" for b in meta['reasons']]
         score = meta['score_long'] if direction == 'LONG' else meta['score_short']
         lines = [f"- {n}: {m}" for n, m in zip(names, marks)]
-        detail_lines = "
-".join(lines)
+        detail_lines = NL.join(lines)
         msg_lines = [
             f"{symbol} {ENTRY_TF}: {direction} SİNYAL ✅ (Skor {score}/{len(marks)})",
             f"Entry={c2:.6f}  SL={positions[symbol]['sl']:.6f}",
@@ -462,8 +461,7 @@ async def scan_symbol(symbol):
             f"ADX4H={meta['adx4']:.1f}  ATR%4H={meta['atrpct4']*100:.2f}%  RSI2H={meta['rsi2']:.1f}",
             detail_lines,
         ]
-        msg = "
-".join(msg_lines)
+        msg = NL.join(msg_lines)
 
         await tg_send(msg)
         logger.info(msg)
@@ -514,7 +512,10 @@ def backtest_symbol(symbol, bars_2h=800):
 # ================== ANA DÖNGÜ ==================
 async def main():
     tz = pytz.timezone(TZ)
-    await tg_send("Scanner başladı: " + datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S'))
+    await tg_send_lines(
+        "Scanner başladı:",
+        datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
+    )
 
     symbols = all_bybit_linear_usdt_symbols(exchange)
     logger.info(f"Taranacak semboller: {len(symbols)}")
@@ -530,7 +531,9 @@ async def main():
             if r: rows.append(r)
         if rows:
             avg_wr = np.nanmean([x['winrate'] for x in rows if x and x.get('winrate') is not None])
-            await tg_send(f"Backtest bitti. Ortalama WR: {avg_wr:.2f}% ({len(rows)} sembol)")
+            await tg_send_lines(
+                f"Backtest bitti. Ortalama WR: {avg_wr:.2f}% ({len(rows)} sembol)"
+            )
         return
 
     # Canlı tarama
