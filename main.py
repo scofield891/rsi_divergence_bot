@@ -68,12 +68,12 @@ logging.getLogger('httpx').setLevel(logging.ERROR)
 # ================== EXCHANGE & TELEGRAM ==================
 exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}, 'timeout': 60000})
 telegram_bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
-def tg_send(text: str):
+async def tg_send(text: str):
     if not telegram_bot:
         logger.info(f"TELEGRAM(MOCK): {text}")
         return
     try:
-        telegram_bot.send_message(chat_id=CHAT_ID, text=text)
+        await telegram_bot.send_message(chat_id=CHAT_ID, text=text)
     except Exception as e:
         logger.error(f"Telegram hata: {e}")
 # ================== İNDİKATÖR FONKSİYONLARI ==================
@@ -282,7 +282,7 @@ async def manage_positions(symbol, df2_recent, atrpct4):
         pos['highest'] = max(pos['highest'], live_high, float(last_closed['high']))
         if (not pos['tsl_on']) and (live_close >= pos['entry'] + TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            tg_send(f"""{symbol} 2H: LONG TSL aktif 🔧
+            await tg_send(f"""{symbol} 2H: LONG TSL aktif 🔧
 Entry: {pos['entry']:.6f} New SL: {pos['sl']:.6f}""")
         if pos['tsl_on']:
             tsl = pos['highest'] - k*atr2
@@ -292,23 +292,23 @@ Entry: {pos['entry']:.6f} New SL: {pos['sl']:.6f}""")
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            tg_send(f"""{symbol} 2H: TP1 🎯
+            await tg_send(f"""{symbol} 2H: TP1 🎯
 TP1={pos['tp1_price']:.6f} SL->BE {pos['sl']:.6f} Kalan %{pos['remaining']*100:.0f}""")
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_high >= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            tg_send(f"""{symbol} 2H: TP2 🎯
+            await tg_send(f"""{symbol} 2H: TP2 🎯
 TP2={pos['tp2_price']:.6f} Kalan %{pos['remaining']*100:.0f} trailing""")
         if live_low <= pos['sl']:
             pnl = (pos['sl'] - pos['entry'])/pos['entry']*100 * pos['remaining']
-            tg_send(f"""{symbol} 2H: LONG EXIT ✅
+            await tg_send(f"""{symbol} 2H: LONG EXIT ✅
 Exit={pos['sl']:.6f} PnL={pnl:.2f}%""")
             del positions[symbol]  # Clean up closed position
     else: # SHORT
         pos['lowest'] = min(pos['lowest'], live_low, float(last_closed['low']))
         if (not pos['tsl_on']) and (live_close <= pos['entry'] - TSL_ACTIVATION_ATR*atr2):
             pos['tsl_on'] = True
-            tg_send(f"""{symbol} 2H: SHORT TSL aktif 🔧
+            await tg_send(f"""{symbol} 2H: SHORT TSL aktif 🔧
 Entry: {pos['entry']:.6f} New SL: {pos['sl']:.6f}""")
         if pos['tsl_on']:
             tsl = pos['lowest'] + k*atr2
@@ -318,16 +318,16 @@ Entry: {pos['entry']:.6f} New SL: {pos['sl']:.6f}""")
             pos['tp1_hit'] = True
             pos['remaining'] -= 0.35
             pos['sl'] = pos['entry']
-            tg_send(f"""{symbol} 2H: TP1 🎯
+            await tg_send(f"""{symbol} 2H: TP1 🎯
 TP1={pos['tp1_price']:.6f} SL->BE {pos['sl']:.6f} Kalan %{pos['remaining']*100:.0f}""")
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_low <= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] -= 0.35
-            tg_send(f"""{symbol} 2H: TP2 🎯
+            await tg_send(f"""{symbol} 2H: TP2 🎯
 TP2={pos['tp2_price']:.6f} Kalan %{pos['remaining']*100:.0f} trailing""")
         if live_high >= pos['sl']:
             pnl = (pos['entry'] - pos['sl'])/pos['entry']*100 * pos['remaining']
-            tg_send(f"""{symbol} 2H: SHORT EXIT ✅
+            await tg_send(f"""{symbol} 2H: SHORT EXIT ✅
 Exit={pos['sl']:.6f} PnL={pnl:.2f}%""")
             del positions[symbol]  # Clean up closed position
 # ================== SİMBOL TARAYICI ==================
@@ -391,7 +391,7 @@ Entry={c2:.6f} SL={positions[symbol]['sl']:.6f}
 TP1={positions[symbol]['tp1_price']:.6f} TP2={positions[symbol]['tp2_price']:.6f}
 ADX4H={meta['adx4']:.1f} ATR%4H={meta['atrpct4']*100:.2f}% RSI2H={meta['rsi2']:.1f}
 {detail_lines}"""
-        tg_send(msg)
+        await tg_send(msg)
         logger.info(msg)
     except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
         logger.warning(f"{symbol}: network/timeout {e}")
@@ -440,7 +440,7 @@ def backtest_symbol(symbol, bars_2h=800):
 async def main():
     tz = pytz.timezone(TZ)
     start_msg = "Scanner başladı: " + datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
-    tg_send(start_msg)
+    await tg_send(start_msg)
     logger.info(start_msg)
     symbols = all_bybit_linear_usdt_symbols(exchange)
     logger.info(f"Taranacak semboller: {len(symbols)}")
@@ -455,7 +455,7 @@ async def main():
             if r: rows.append(r)
         if rows:
             avg_wr = np.nanmean([x['winrate'] for x in rows if x and x.get('winrate') is not None])
-            tg_send(f"Backtest bitti. Ortalama WR: {avg_wr:.2f}% ({len(rows)} sembol)")
+            await tg_send(f"Backtest bitti. Ortalama WR: {avg_wr:.2f}% ({len(rows)} sembol)")
         return
     # Canlı tarama
     stop_flag = False
