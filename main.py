@@ -9,40 +9,38 @@ import sys
 from datetime import datetime, timedelta
 import pytz
 from telegram import Bot
+from telegram.request import HTTPXRequest
 import signal as os_signal
 import time
 
 """
-Bybit High-WR Scanner (4H regime + 2H entry) – v1.5.0
+Bybit High-WR Scanner (4H regime + 2H entry) – v1.5.1
 
 - ATR yüzde tabanlı mesafeler:
-  SL = 1.8 x ATR%, TP1 = 2.0 x ATR%, TP2 = 3.5 x ATR%
+  SL = 1.8 x ATR, TP1 = 2.0 x ATR, TP2 = 3.5 x ATR
 - TP1 %30 kapat + SL=BE; TP2 %40 kapat; kalan %30 TSL
-- 4H rejim, 2H giriş (RSI trigger + pullback/div + mum teyidi + gövde gücü + likidite)
+- 4H rejim, 2H giriş (RSI trigger + pullback/hidden div + mum teyidi + gövde gücü + likidite)
 - RSI50 kuralı: Long >= 50, Short <= 50
 - Wilder ADX/DI
-- Telegram kuyruk + rate limit (pool timeout çözümü)
+- Telegram kuyruğu + rate limit + HTTPXRequest (pool büyütme)
 """
 
 # ================== KULLANICI AYARLARI ==================
-# (istenildiği gibi sabit bırakıldı)
 BOT_TOKEN = "7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY"
 CHAT_ID = "-1002755412514"
 TZ = 'Europe/Istanbul'
 
-# Çalışma modu
 LIVE_SCAN_MODE = True
 BACKTEST_MODE = False
 
-# Taramalar
 REGIME_TF = '4h'
 ENTRY_TF  = '2h'
 SCAN_SLEEP_SEC = 300
 BATCH_SIZE = 16
 COOLDOWN_MINUTES = 90
 
-# --- YÜKSEK WIN-RATE preset ---
-SCORE_MIN = 8           # sıkı skor kapısı
+# --- High-WR preset ---
+SCORE_MIN = 8
 ADX_MIN_4H = 20
 ADX_MAX_4H = 35
 ATRPCT_MIN_4H = 0.012   # %1.2
@@ -50,36 +48,29 @@ ATRPCT_MAX_4H = 0.050   # %5.0
 PULLBACK_TOL_ATR = 0.08 # 0.08 x ATR (2H)
 DI_ADX_MIN_2H = 18
 
-# Divergence penceresi
 DIV_LOOKBACK = 30
 DIV_MIN_DISTANCE = 6
 
-# SL/TP/Trailing (ATR% bazlı)
+# SL/TP/Trail (ATR% bazlı, pratikte ATR px ile aynı mesafe)
 SL_ATR_MULT        = 1.8
 TP1_ATR_MULT       = 2.0
 TP2_ATR_MULT       = 3.5
 TSL_ACTIVATION_ATR = 1.0
 TSL_K_LOWVOL  = 2.0
 TSL_K_HIGHVOL = 2.5
-VOL_SPLIT_ATRPCT = 0.030  # %3 (4H ATR% düşük/yüksek ayrımı)
+VOL_SPLIT_ATRPCT = 0.030  # %3
 
-# Gövde gücü (2H mum gövdesi en az şu kadar olmalı)
-BODY_ATR_MULT = 0.5      # 0.5 x ATR (2H)
-
-# Likidite eşiği (rolling dollar-volume persentil)
+BODY_ATR_MULT = 0.5       # 0.5 x ATR(2H) gövde eşiği
 LIQ_ROLL_BARS = 60
 LIQ_QUANTILE  = 0.60
 
-# Partial close oranları
-TP1_CLOSE_RATIO   = 0.30  # %30
-TP2_CLOSE_RATIO   = 0.40  # %40
-FINAL_TRAIL_RATIO = 0.30  # %30
+TP1_CLOSE_RATIO   = 0.30
+TP2_CLOSE_RATIO   = 0.40
+FINAL_TRAIL_RATIO = 0.30
 
-# Veri limitleri
 LIMIT_4H = 260
 LIMIT_2H = 520
 
-# Telegram rate-limit
 TELEGRAM_MAX_MSG_PER_SEC = 3.0
 
 # ================== LOG ==================
@@ -95,16 +86,23 @@ logging.getLogger('httpx').setLevel(logging.ERROR)
 exchange = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'linear'}, 'timeout': 60000})
 
 # ================== TELEGRAM (Kuyruk + Worker) ==================
-telegram_bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
+# Daha büyük connection pool ve timeoutlar:
+_request = HTTPXRequest(
+    connection_pool_size=20,
+    read_timeout=20.0,
+    write_timeout=20.0,
+    connect_timeout=10.0,
+    pool_timeout=5.0,
+)
+telegram_bot = Bot(token=BOT_TOKEN, request=_request) if BOT_TOKEN else None
 _msg_queue: asyncio.Queue[str] = asyncio.Queue()
 
 async def tg_send(text: str):
-    """Mesajı kuyruğa at (worker sıralı ve sınırlı hızla yollar)."""
     await _msg_queue.put(text)
 
 async def telegram_worker():
     if not telegram_bot:
-        # Mock: Kuyruk boşalt, logla
+        # Mock: Kuyruğu boşalt, logla
         while True:
             msg = await _msg_queue.get()
             logger.info(f"TELEGRAM(MOCK): {msg}")
@@ -112,7 +110,6 @@ async def telegram_worker():
     else:
         min_interval = 1.0 / TELEGRAM_MAX_MSG_PER_SEC
         last_sent = 0.0
-        loop = asyncio.get_running_loop()
         while True:
             text = await _msg_queue.get()
             now = time.monotonic()
@@ -120,8 +117,8 @@ async def telegram_worker():
             if delta < min_interval:
                 await asyncio.sleep(min_interval - delta)
             try:
-                # Bot.send_message sync -> executor
-                await loop.run_in_executor(None, lambda: telegram_bot.send_message(chat_id=CHAT_ID, text=text))
+                # ASYNC: mutlaka await!
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=text)
             except Exception as e:
                 logger.error(f"Telegram hata: {e}")
             last_sent = time.monotonic()
@@ -295,31 +292,26 @@ def evaluate_signal(df4, df2):
     c2        = closes2[-2]
     o2        = opens2[-2]
     atr2_last = atr2[-2]
-    atrpct2   = atr2_last / max(c2, 1e-9)   # ATR%'ye çevirme için
+    atrpct2   = atr2_last / max(c2, 1e-9)
 
     bull_hidden, bear_hidden = hidden_divergence(closes2, rsi2, lookback=DIV_LOOKBACK, min_distance=DIV_MIN_DISTANCE, order=3)
     pullback_long  = in_pullback_zone(c2, ema20_2[-2], ema50_2[-2], atr2_last, PULLBACK_TOL_ATR, 'long')
     pullback_short = in_pullback_zone(c2, ema20_2[-2], ema50_2[-2], atr2_last, PULLBACK_TOL_ATR, 'short')
 
-    # RSI50 kuralı
     rsi50_long  = (rsi2[-2] >= 50.0)
     rsi50_short = (rsi2[-2] <= 50.0)
 
-    # RSI~EMA(9) trigger
     trigger_long  = (rsi2[-3] <= rsi_ema9[-3]) and (rsi2[-2] >  rsi_ema9[-2])
     trigger_short = (rsi2[-3] >= rsi_ema9[-3]) and (rsi2[-2] <  rsi_ema9[-2])
 
-    # DI/ADX 2H
     di_ok_long  = (pdi2[-2] >  mdi2[-2]) and (adx2[-2] >= DI_ADX_MIN_2H)
     di_ok_short = (mdi2[-2] >  pdi2[-2]) and (adx2[-2] >= DI_ADX_MIN_2H)
 
-    # Mum teyidi + gövde gücü (2H)
     confirm_long  = (c2 > ema20_2[-2]) and (c2 > o2)
     confirm_short = (c2 < ema20_2[-2]) and (c2 < o2)
     body_size     = abs(c2 - o2)
     body_ok       = (body_size >= BODY_ATR_MULT * (atrpct2 * c2))  # 0.5 x ATR(2H)
 
-    # Likidite (rolling dollar-volume persentil)
     dollar_vol2 = (df2['close'] * df2['volume']).astype(float)
     q = dollar_vol2.rolling(LIQ_ROLL_BARS, min_periods=max(10, LIQ_ROLL_BARS//2)).quantile(LIQ_QUANTILE)
     liquidity_ok = bool(dollar_vol2.iloc[-2] >= q.iloc[-2])
@@ -356,15 +348,13 @@ def evaluate_signal(df4, df2):
 
 # ================== YARDIMCILAR ==================
 def last_swing(df2, direction):
-    # son 10 kapalı bar
     if direction == 'LONG':
         return float(df2['low'].iloc[-11:-1].min())
     else:
         return float(df2['high'].iloc[-11:-1].max())
 
-def tp_k_from_atr_pct(atrpct4):
-    # düşük vol'de daha geniş trail
-    return vol_k_from_atr_pct(atrpct4)
+def vol_k_from_atr_pct(atrpct):
+    return TSL_K_LOWVOL if atrpct <= VOL_SPLIT_ATRPCT else TSL_K_HIGHVOL
 
 # ================== YÖNETİM ==================
 async def manage_positions(symbol, df2_recent, atrpct4):
@@ -376,15 +366,14 @@ async def manage_positions(symbol, df2_recent, atrpct4):
     live_bar    = df2_recent.iloc[-1]
     live_high = float(live_bar['high']); live_low = float(live_bar['low']); live_close = float(live_bar['close'])
 
-    k = tp_k_from_atr_pct(atrpct4)
-    atr_px = pos.get('atr_px', pos['atr2'])  # ATR% tabanlı fiyat adımı (geri uyum)
+    k = vol_k_from_atr_pct(atrpct4)
+    atr_px = pos.get('atr_px', pos['atr2'])  # ATR% tabanlı fiyat adımı (uyum)
 
     def J(*parts): return "\n".join(parts)
 
     if pos['side'] == 'LONG':
         pos['highest'] = max(pos['highest'], live_high, float(last_closed['high']))
 
-        # TSL aktivasyon
         if (not pos['tsl_on']) and (live_close >= pos['entry'] + TSL_ACTIVATION_ATR * atr_px):
             pos['tsl_on'] = True
             await tg_send(J(
@@ -392,13 +381,11 @@ async def manage_positions(symbol, df2_recent, atrpct4):
                 f"Entry: {pos['entry']:.6f}  New SL: {pos['sl']:.6f}"
             ))
 
-        # TSL takip
         if pos['tsl_on']:
             tsl = pos['highest'] - k * atr_px
             if tsl > pos['sl']:
                 pos['sl'] = tsl
 
-        # TP1: %30 kapat + SL -> BE (asla geri çekme)
         if (not pos['tp1_hit']) and (live_high >= pos['tp1_price']):
             pos['tp1_hit'] = True
             pos['remaining'] = max(0.0, pos['remaining'] - TP1_CLOSE_RATIO)
@@ -408,7 +395,6 @@ async def manage_positions(symbol, df2_recent, atrpct4):
                 f"TP1={pos['tp1_price']:.6f}  SL->BE {pos['sl']:.6f}  Kalan %{pos['remaining']*100:.0f}"
             ))
 
-        # TP2: %40 kapat, kalan %30 trailing
         if pos['tp1_hit'] and (not pos['tp2_hit']) and (live_high >= pos['tp2_price']):
             pos['tp2_hit'] = True
             pos['remaining'] = max(0.0, pos['remaining'] - TP2_CLOSE_RATIO)
@@ -417,7 +403,6 @@ async def manage_positions(symbol, df2_recent, atrpct4):
                 f"TP2={pos['tp2_price']:.6f}  Kalan %{pos['remaining']*100:.0f} trailing"
             ))
 
-        # Stop tetiklenirse çık
         if live_low <= pos['sl']:
             pnl = (pos['sl'] - pos['entry'])/pos['entry']*100 * pos['remaining']
             await tg_send(J(
@@ -494,14 +479,14 @@ async def scan_symbol(symbol):
             return
         last_signal_time[key] = now
 
-        # ATR% → fiyat adımı
+        # ATR% -> fiyat adımı (eşdeğer: atr_px = atr2)
         c2        = meta['c2']
         atr2      = meta['atr2']
         atrpct2   = meta['atrpct2']
         atrpct4   = meta['atrpct4']
         atr_px    = atrpct2 * c2
 
-        # SL/TP hesapla
+        # SL/TP
         if direction == 'LONG':
             swing = last_swing(df2, 'LONG')
             sl  = max(c2 - SL_ATR_MULT * atr_px, swing)
@@ -592,14 +577,14 @@ def backtest_symbol(symbol, bars_2h=800):
 # ================== ANA ==================
 async def main():
     tz = pytz.timezone(TZ)
+
+    # Telegram worker'ı ÖNCE başlat
+    worker_task = asyncio.create_task(telegram_worker())
+
     start_msg = "Scanner başladı: " + datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
     await tg_send(start_msg)
     logger.info(start_msg)
 
-    # Telegram worker'ı başlat
-    worker_task = asyncio.create_task(telegram_worker())
-
-    # Semboller
     symbols = all_bybit_linear_usdt_symbols(exchange)
     logger.info(f"Taranacak semboller: {len(symbols)}")
     if not symbols:
@@ -627,7 +612,6 @@ async def main():
         try: os_signal.signal(sig, _stop)
         except Exception: pass
 
-    # Canlı tarama
     try:
         while not stop_flag:
             tasks = [scan_symbol(s) for s in symbols]
@@ -637,7 +621,6 @@ async def main():
             logger.info(f"Tur bitti. {SCAN_SLEEP_SEC//60} dk bekleniyor...")
             await asyncio.sleep(SCAN_SLEEP_SEC)
     finally:
-        # Kuyruğu boşaltmayı bekle, worker'ı kapat
         try:
             await _msg_queue.join()
         finally:
