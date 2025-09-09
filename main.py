@@ -67,6 +67,11 @@ FOLLOW_THROUGH_LOOKAHEAD   = 2
 FOLLOW_THROUGH_WICK_MAX    = 0.35
 FOLLOW_THROUGH_VOL_Z_MIN   = 1.5
 
+# === Bull-trap için BB/KC kapısı (gate) ===
+USE_TRAP_BBKC_GATE = True
+BB_UPPER_PROX = 0.20         # BB üst banda yakınlık eşiği (0→banda yapışık)
+KC_REQUIRE_ABOVE = False     # True: close >= kc_upper şartı eklenir (daha seçici)
+
 # Telegram rate-limit
 TG_CONCURRENCY = 6
 
@@ -217,6 +222,25 @@ def get_atr_values(df, lookback_atr=18):
     avg_atr_ratio = float(atr_series.mean() / close_last) if len(atr_series) and pd.notna(close_last) and close_last != 0 else np.nan
     return atr_value, avg_atr_ratio
 
+# === BB/KC ===
+def calculate_bb(df, period=20, mult=2.0):
+    df['bb_mid'] = df['close'].rolling(period).mean()
+    df['bb_std'] = df['close'].rolling(period).std()
+    df['bb_upper'] = df['bb_mid'] + mult * df['bb_std']
+    df['bb_lower'] = df['bb_mid'] - mult * df['bb_std']
+    return df
+
+def calculate_kc(df, period=20, atr_period=20, mult=1.5):
+    df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period), index=df.index)
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['atr_kc'] = tr.rolling(atr_period).mean()
+    df['kc_upper'] = df['kc_mid'] + mult * df['atr_kc']
+    df['kc_lower'] = df['kc_mid'] - mult * df['atr_kc']
+    return df
+
 # === Wick/Gövde ölçümü ===
 def candle_body_wicks(row):
     o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
@@ -279,7 +303,9 @@ def calculate_indicators(df, timeframe):
     else:
         df['liq_ok'] = True
 
-    # Bull-trap için hacim istatistikleri
+    # BB/KC + ATR + hacim istatistikleri
+    df = calculate_bb(df)
+    df = calculate_kc(df)
     df = calculate_obv_and_volma(df, vol_ma_window=VOL_MA_WINDOW)
     df = ensure_atr(df, period=14)
     return df
@@ -396,7 +422,26 @@ async def check_signals(symbol, timeframe):
         body_r, upper_wick_r, lower_wick_r = candle_body_wicks(closed_candle)
         breakout_bypass = (body_r >= BODY_TO_RANGE_BREAKOUT_MIN and upper_wick_r <= (1.0 - BODY_TO_RANGE_BREAKOUT_MIN))
 
-        if USE_VOL_SPIKE_TRAP and not breakout_bypass:
+        # ---- BB/KC gate (opsiyonel) ----
+        gate_ok = True
+        if USE_TRAP_BBKC_GATE:
+            bb_up  = float(closed_candle.get('bb_upper', np.nan))
+            bb_mid = float(closed_candle.get('bb_mid',   np.nan))
+            kc_up  = float(closed_candle.get('kc_upper', np.nan))
+            close_ = float(closed_candle['close'])
+
+            prox_ok = False
+            if np.isfinite(bb_up) and np.isfinite(bb_mid) and (bb_up - bb_mid) > 0:
+                rel = (bb_up - close_) / (bb_up - bb_mid)  # 0 → banda yapışık
+                prox_ok = (rel <= BB_UPPER_PROX)
+
+            kc_ok = True
+            if KC_REQUIRE_ABOVE and np.isfinite(kc_up):
+                kc_ok = (close_ >= kc_up)
+
+            gate_ok = bool(prox_ok and kc_ok)
+
+        if USE_VOL_SPIKE_TRAP and gate_ok and not breakout_bypass:
             closed = closed_candle
             pre_slice = df['volume'].iloc[-(PRELOW_BARS+2):-2]
             vol_ma = float(closed.get('vol_ma', np.nan)) if pd.notna(closed.get('vol_ma', np.nan)) else np.nan
@@ -434,10 +479,10 @@ async def check_signals(symbol, timeframe):
                     signal_cache[key] = pos
 
             vz = float(vol_z_val) if (pd.notna(vol_z_val) and np.isfinite(vol_z_val)) else float('nan')
-            logger.info(f"{symbol} {timeframe} | TRAP={spike_trap_buy} BYPASS={breakout_bypass} FTHRU={follow_through_ok} "
+            logger.info(f"{symbol} {timeframe} | TRAP={spike_trap_buy} BYPASS={breakout_bypass} FTHRU={follow_through_ok} GATE={gate_ok} "
                         f"(pre_ok={pre_ok}, spike_ok={spike_ok}, wick_ok={wick_ok}, vol_z={vz:.2f})")
         else:
-            logger.info(f"{symbol} {timeframe} | BYPASS breakout: body_r={body_r:.2f}, upper_wick_r={upper_wick_r:.2f}")
+            logger.info(f"{symbol} {timeframe} | TRAP SKIP (gate_ok={gate_ok}, bypass={breakout_bypass}) body={body_r:.2f} wickU={upper_wick_r:.2f}")
 
         # Trap state kaydet (follow-through için)
         if spike_trap_buy:
