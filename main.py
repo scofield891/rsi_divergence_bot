@@ -7,42 +7,32 @@ import asyncio
 from datetime import datetime, timedelta
 import pytz
 import sys
-import os
 
 # ================== Sabit Değerler ==================
-# Güvenlik notu: Token/Chat ID'yi ENV'den okuman önerilir.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY")
-CHAT_ID   = os.getenv("CHAT_ID", "-1002755412514")
+BOT_TOKEN = "7608720362:AAHp10_7CVfEYoBtPWlQPxH37rrn40NbIuY"
+CHAT_ID = '-1002755412514'
 
 TEST_MODE = False
 
-# Diverjans & giriş tarafı (senin mantık)
 RSI_LOW = 40
 RSI_HIGH = 60
 EMA_THRESHOLD = 0.5
-LOOKBACK_DIVERGENCE = 30
-LOOKBACK_CROSSOVER = 10
-DIVERGENCE_MIN_DISTANCE = 5
-MACD_MODE = "regime"  # "and" | "regime" | "off"
 
-# Volatilite/ATR & TP/SL
+# === TSL YOK ===
+
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8
-TP_MULTIPLIER1 = 2.0
-TP_MULTIPLIER2 = 3.5
-SL_BUFFER = 0.3       # toplam SL ≈ 2.1×ATR
-
-# === Normalize edilmiş % clamp ===
-MIN_SL_PCT = 0.006   # %0.6
-MAX_SL_PCT = 0.030   # %3.0
-MIN_TP_PCT = 0.008   # %0.8
-MAX_TP_PCT = 0.040   # %4.0
-
+TP_MULTIPLIER1 = 2.0  # TP1 (%30)
+TP_MULTIPLIER2 = 3.5  # TP2 (%40)
+SL_BUFFER = 0.3
 COOLDOWN_MINUTES = 60
 INSTANT_SL_BUFFER = 0.05
 
-# === Crossover EXIT histerezisi (ATR tabanlı) ===
-EXIT_HYST_ATR = 0.15
+# Sinyal toggles
+MACD_MODE = "regime"
+LOOKBACK_DIVERGENCE = 30
+LOOKBACK_CROSSOVER = 10
+DIVERGENCE_MIN_DISTANCE = 5
 
 # === Likidite filtresi (opsiyonel) ===
 USE_LIQ_FILTER = False
@@ -50,29 +40,7 @@ LIQ_ROLL_BARS = 60
 LIQ_QUANTILE  = 0.70
 LIQ_MIN_DVOL_USD = 0
 
-# ================== Bull-trap filtresi (özellikle LONG'lar) ==================
-USE_VOL_SPIKE_TRAP = True
-VOL_MA_WINDOW = 20
-SPIKE_WINDOW = 60
-SPIKE_Z = 3.0
-SPIKE_MULTI = 2.0
-PRELOW_BARS = 5
-PRELOW_MULT = 0.9
-UPPER_WICK_MIN = 0.45
-BODY_TO_RANGE_MAX = 0.50
-
-# Breakout bypass & follow-through override
-BODY_TO_RANGE_BREAKOUT_MIN = 0.60
-FOLLOW_THROUGH_LOOKAHEAD   = 2
-FOLLOW_THROUGH_WICK_MAX    = 0.35
-FOLLOW_THROUGH_VOL_Z_MIN   = 1.5
-
-# === Bull-trap için BB/KC kapısı (gate) ===
-USE_TRAP_BBKC_GATE = True
-BB_UPPER_PROX = 0.20         # BB üst banda yakınlık eşiği (0→banda yapışık)
-KC_REQUIRE_ABOVE = False     # True: close >= kc_upper şartı eklenir (daha seçici)
-
-# Telegram rate-limit
+# Telegram rate-limit (eşzamanlı mesaj sayısı)
 TG_CONCURRENCY = 6
 
 # ================== Logging ==================
@@ -81,8 +49,7 @@ logger.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(formatter)
-if not logger.handlers:
-    logger.addHandler(console_handler)
+logger.addHandler(console_handler)
 file_handler = logging.FileHandler('bot.log')
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
@@ -106,14 +73,10 @@ async def tg_send(text: str):
     except Exception as e:
         logger.error(f"Telegram hata: {e}")
 
-# ================== Util ==================
-def clamp(x, lo, hi):
-    return max(lo, min(hi, x))
-
 # Pozisyon/Sinyal durumu
 signal_cache = {}
 
-# ================== Sembol Keşfi (Bybit USDT linear perp) ==================
+# ================== Sembol Keşfi (TÜM Bybit USDT linear perp) ==================
 def all_bybit_linear_usdt_symbols():
     mkts = exchange.load_markets()
     syms = []
@@ -216,73 +179,16 @@ def get_atr_values(df, lookback_atr=18):
     df = ensure_atr(df, period=14)
     if len(df) < lookback_atr + 2:
         return np.nan, np.nan
-    atr_value = float(df['atr'].iloc[-2]) if pd.notna(df['atr'].iloc[-2]) else np.nan
-    close_last = float(df['close'].iloc[-2]) if pd.notna(df['close'].iloc[-2]) else np.nan
+    atr_value = float(df['atr'].iloc[-2])
+    close_last = float(df['close'].iloc[-2])
     atr_series = df['atr'].iloc[-(lookback_atr+1):-1]
-    avg_atr_ratio = float(atr_series.mean() / close_last) if len(atr_series) and pd.notna(close_last) and close_last != 0 else np.nan
+    avg_atr_ratio = float(atr_series.mean() / close_last) if len(atr_series) else np.nan
     return atr_value, avg_atr_ratio
-
-# === BB/KC ===
-def calculate_bb(df, period=20, mult=2.0):
-    df['bb_mid'] = df['close'].rolling(period).mean()
-    df['bb_std'] = df['close'].rolling(period).std()
-    df['bb_upper'] = df['bb_mid'] + mult * df['bb_std']
-    df['bb_lower'] = df['bb_mid'] - mult * df['bb_std']
-    return df
-
-def calculate_kc(df, period=20, atr_period=20, mult=1.5):
-    df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period), index=df.index)
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['atr_kc'] = tr.rolling(atr_period).mean()
-    df['kc_upper'] = df['kc_mid'] + mult * df['atr_kc']
-    df['kc_lower'] = df['kc_mid'] - mult * df['atr_kc']
-    return df
-
-# === Wick/Gövde ölçümü ===
-def candle_body_wicks(row):
-    o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
-    rng = max(h - l, 1e-12)
-    body = abs(c - o)
-    upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
-    return body / rng, upper_wick / rng, lower_wick / rng
-
-# === Robust hacim istatistikleri + vol_ma ===
-def calculate_obv_and_volma(df, vol_ma_window=VOL_MA_WINDOW):
-    close = df['close'].values
-    vol = df['volume'].values
-    obv = np.zeros_like(close, dtype=float)
-    for i in range(1, len(close)):
-        if close[i] > close[i-1]:
-            obv[i] = obv[i-1] + vol[i]
-        elif close[i] < close[i-1]:
-            obv[i] = obv[i-1] - vol[i]
-        else:
-            obv[i] = obv[i-1]
-    df['obv'] = obv
-    df['vol_ma'] = pd.Series(vol, index=df.index, dtype="float64").rolling(vol_ma_window).mean()
-
-    vol_s = pd.Series(vol, index=df.index, dtype="float64")
-    df['vol_med'] = vol_s.rolling(SPIKE_WINDOW).median()
-    df['vol_mad'] = vol_s.rolling(SPIKE_WINDOW).apply(
-        lambda x: np.median(np.abs(x - np.median(x))), raw=True
-    )
-    denom = (1.4826 * df['vol_mad']).replace(0, np.nan)  # MAD -> sigma
-    df['vol_z'] = (vol_s - df['vol_med']) / denom
-    return df
 
 def calculate_indicators(df, timeframe):
     if len(df) < 80:
         logger.warning("DF çok kısa, indikatör hesaplanamadı.")
         return None
-    # zaman damgasını indexe al
-    if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
-        df.set_index('timestamp', inplace=True)
-
     closes = df['close'].values.astype(np.float64)
     df['ema13'] = calculate_ema(closes, span=13)
     df['sma34'] = calculate_sma(closes, period=34)
@@ -303,11 +209,6 @@ def calculate_indicators(df, timeframe):
     else:
         df['liq_ok'] = True
 
-    # BB/KC + ATR + hacim istatistikleri
-    df = calculate_bb(df)
-    df = calculate_kc(df)
-    df = calculate_obv_and_volma(df, vol_ma_window=VOL_MA_WINDOW)
-    df = ensure_atr(df, period=14)
     return df
 
 # ================== Sinyal Döngüsü ==================
@@ -351,28 +252,27 @@ async def check_signals(symbol, timeframe):
             logger.warning(f"ATR NaN/Inf ({symbol} {timeframe}), skip.")
             return
 
-        # Likidite filtresi (son kapalı mum)
+        # Likidite filtresi (son kapalı mumda)
         liq_ok = bool(df['liq_ok'].iloc[-2])
-        closed_candle = df.iloc[-2]
 
+        closed_candle = df.iloc[-2]
         key = f"{symbol}_{timeframe}"
-        # trap state ekliyoruz
         current_pos = signal_cache.get(key, {
             'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
-            'remaining_ratio': 1.0,
-            'last_signal_time': None, 'last_signal_type': None, 'entry_time': None,
-            'tp1_hit': False, 'tp2_hit': False,
-            'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+            'highest_price': None, 'lowest_price': None,
+            'avg_atr_ratio': None, 'remaining_ratio': 1.0,
+            'last_signal_time': None, 'last_signal_type': None,
+            'entry_time': None, 'tp1_hit': False, 'tp2_hit': False
         })
 
-        # === Diverjans + EMA/SMA giriş (senin mantığın) ===
+        # Diverjans + giriş kesişimi
         lookback_div = LOOKBACK_DIVERGENCE
         price_slice = df['close'].values[-lookback_div-1:-1]
         ema_slice = df['rsi_ema'].values[-lookback_div-1:-1]
         ema13_slice = df['ema13'].values[-lookback_div-1:-1]
         sma34_slice = df['sma34'].values[-lookback_div-1:-1]
-
         price_highs, price_lows = find_local_extrema(price_slice)
+
         bullish = False
         bearish = False
         ema_sma_crossover_buy = False
@@ -411,343 +311,331 @@ async def check_signals(symbol, timeframe):
         hist_up = df['macd_hist'].iloc[-2] > 0
         hist_down = df['macd_hist'].iloc[-2] < 0
 
-        if   MACD_MODE == "and":    macd_ok_long, macd_ok_short = (macd_up and hist_up), (macd_down and hist_down)
-        elif MACD_MODE == "regime": macd_ok_long, macd_ok_short = macd_up, macd_down
-        else:                        macd_ok_long, macd_ok_short = True, True
-
-        # ================== BULL-TRAP FİLTRESİ (LONG iptali) ==================
-        spike_trap_buy = False
-        follow_through_ok = False
-
-        body_r, upper_wick_r, lower_wick_r = candle_body_wicks(closed_candle)
-        breakout_bypass = (body_r >= BODY_TO_RANGE_BREAKOUT_MIN and upper_wick_r <= (1.0 - BODY_TO_RANGE_BREAKOUT_MIN))
-
-        # ---- BB/KC gate (opsiyonel) ----
-        gate_ok = True
-        if USE_TRAP_BBKC_GATE:
-            bb_up  = float(closed_candle.get('bb_upper', np.nan))
-            bb_mid = float(closed_candle.get('bb_mid',   np.nan))
-            kc_up  = float(closed_candle.get('kc_upper', np.nan))
-            close_ = float(closed_candle['close'])
-
-            prox_ok = False
-            if np.isfinite(bb_up) and np.isfinite(bb_mid) and (bb_up - bb_mid) > 0:
-                rel = (bb_up - close_) / (bb_up - bb_mid)  # 0 → banda yapışık
-                prox_ok = (rel <= BB_UPPER_PROX)
-
-            kc_ok = True
-            if KC_REQUIRE_ABOVE and np.isfinite(kc_up):
-                kc_ok = (close_ >= kc_up)
-
-            gate_ok = bool(prox_ok and kc_ok)
-
-        if USE_VOL_SPIKE_TRAP and gate_ok and not breakout_bypass:
-            closed = closed_candle
-            pre_slice = df['volume'].iloc[-(PRELOW_BARS+2):-2]
-            vol_ma = float(closed.get('vol_ma', np.nan)) if pd.notna(closed.get('vol_ma', np.nan)) else np.nan
-            pre_ok = False
-            if len(pre_slice) >= max(2, PRELOW_BARS - 1) and np.isfinite(vol_ma) and vol_ma > 0:
-                pre_ok = (pre_slice.mean() <= PRELOW_MULT * vol_ma)
-
-            vol_now = float(closed['volume'])
-            vol_z_val = closed.get('vol_z', np.nan)
-            vol_z_ok = (pd.notna(vol_z_val) and np.isfinite(vol_z_val) and float(vol_z_val) >= SPIKE_Z)
-            multi_ok = (np.isfinite(vol_ma) and vol_ma > 0 and vol_now >= SPIKE_MULTI * vol_ma)
-            spike_ok = bool(vol_z_ok or multi_ok)
-
-            wick_ok = (upper_wick_r >= UPPER_WICK_MIN) and (body_r <= BODY_TO_RANGE_MAX)
-            spike_trap_buy = bool(pre_ok and spike_ok and wick_ok)
-
-            # Follow-through override (önceden trap aktifse)
-            pos = signal_cache.get(key, {})
-            if pos.get('trap_active', False):
-                in_window = True
-                if pos.get('trap_expire_idx') is not None:
-                    in_window = (df.index[-2] <= pos['trap_expire_idx'])
-                ft_vol_z = float(vol_z_val) if (pd.notna(vol_z_val) and np.isfinite(vol_z_val)) else np.nan
-                if (in_window and
-                    pd.notna(pos.get('trap_high')) and
-                    closed['close'] > float(pos['trap_high']) and
-                    body_r >= BODY_TO_RANGE_BREAKOUT_MIN and
-                    upper_wick_r <= FOLLOW_THROUGH_WICK_MAX and
-                    (pd.isna(ft_vol_z) or ft_vol_z >= FOLLOW_THROUGH_VOL_Z_MIN)):
-                    follow_through_ok = True
-                    spike_trap_buy = False
-                    pos['trap_active'] = False
-                    pos['trap_high'] = None
-                    pos['trap_expire_idx'] = None
-                    signal_cache[key] = pos
-
-            vz = float(vol_z_val) if (pd.notna(vol_z_val) and np.isfinite(vol_z_val)) else float('nan')
-            logger.info(f"{symbol} {timeframe} | TRAP={spike_trap_buy} BYPASS={breakout_bypass} FTHRU={follow_through_ok} GATE={gate_ok} "
-                        f"(pre_ok={pre_ok}, spike_ok={spike_ok}, wick_ok={wick_ok}, vol_z={vz:.2f})")
+        if MACD_MODE == "and":
+            macd_ok_long = macd_up and hist_up
+            macd_ok_short = macd_down and hist_down
+        elif MACD_MODE == "regime":
+            macd_ok_long = macd_up
+            macd_ok_short = macd_down
         else:
-            logger.info(f"{symbol} {timeframe} | TRAP SKIP (gate_ok={gate_ok}, bypass={breakout_bypass}) body={body_r:.2f} wickU={upper_wick_r:.2f}")
+            macd_ok_long = True
+            macd_ok_short = True
 
-        # Trap state kaydet (follow-through için)
-        if spike_trap_buy:
-            bar_delta = (df.index[-2] - df.index[-3]) if len(df.index) >= 3 else pd.Timedelta(0)
-            signal_cache[key] = {
-                **current_pos,
-                'trap_active': True,
-                'trap_high': float(closed_candle['high']),
-                'trap_expire_idx': df.index[-2] + bar_delta * FOLLOW_THROUGH_LOOKAHEAD
-            }
-        else:
-            signal_cache[key] = {**current_pos, **signal_cache.get(key, {})}
+        logger.info(
+            f"{symbol} {timeframe} | "
+            f"DivBull={bullish}, DivBear={bearish} | "
+            f"CrossBuy={ema_sma_crossover_buy}, CrossSell={ema_sma_crossover_sell} | "
+            f"MACD_MODE={MACD_MODE} (up={macd_up}, hist_up={hist_up}) | "
+            f"LIQ_OK={liq_ok}"
+        )
 
-        # === BUY/SELL giriş koşulları ===
-        buy_condition  = (ema_sma_crossover_buy  and bullish and macd_ok_long  and liq_ok and (not spike_trap_buy))
-        sell_condition = (ema_sma_crossover_sell and bearish and macd_ok_short and liq_ok)
+        buy_condition  = ema_sma_crossover_buy  and bullish and macd_ok_long  and liq_ok
+        sell_condition = ema_sma_crossover_sell and bearish and macd_ok_short and liq_ok
 
-        # Pozisyon & zaman
-        current_pos = signal_cache.get(key, signal_cache[key])
-        current_price = float(df['close'].iloc[-1])
+        # === EMA/SMA EXIT kesişimleri (son kapalı mum) ===
+        ema_prev, sma_prev = df['ema13'].iloc[-3], df['sma34'].iloc[-3]
+        ema_last, sma_last = df['ema13'].iloc[-2], df['sma34'].iloc[-2]
+        exit_cross_long  = (pd.notna(ema_prev) and pd.notna(sma_prev) and pd.notna(ema_last) and pd.notna(sma_last)
+                            and (ema_prev >= sma_prev) and (ema_last < sma_last))   # bearish cross -> long kapat
+        exit_cross_short = (pd.notna(ema_prev) and pd.notna(sma_prev) and pd.notna(ema_last) and pd.notna(sma_last)
+                            and (ema_prev <= sma_prev) and (ema_last > sma_last))   # bullish cross -> short kapat
+
+        # Pozisyon yönetimi (önce reversal check)
+        current_pos = signal_cache.get(key, current_pos)
+        current_price = float(df.iloc[-1]['close'])
         tz = pytz.timezone('Europe/Istanbul')
         now = datetime.now(tz)
 
-        # Reversal kapanış (zıt sinyal çıkarsa)
-        if (buy_condition or sell_condition) and (current_pos['signal'] is not None):
+        if buy_condition or sell_condition:
             new_signal = 'buy' if buy_condition else 'sell'
-            if current_pos['signal'] != new_signal:
+            if current_pos['signal'] is not None and current_pos['signal'] != new_signal:
+                # Reversal close
                 if current_pos['signal'] == 'buy':
                     profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
+                    message_type = "LONG REVERSAL CLOSE 🚀" if profit_percent > 0 else "LONG REVERSAL STOP 📉"
+                    profit_text = f"Profit: {profit_percent:.2f}%" if profit_percent > 0 else f"Loss: {profit_percent:.2f}%"
                 else:
                     profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
-                await tg_send(
-                    f"{symbol} {timeframe}: REVERSAL CLOSE 🔁\n"
-                    f"Price: {current_price:.6f}\nP/L: {profit_percent:.2f}%\n"
-                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı\n"
+                    message_type = "SHORT REVERSAL CLOSE 🚀" if profit_percent > 0 else "SHORT REVERSAL STOP 📉"
+                    profit_text = f"Profit: {profit_percent:.2f}%" if profit_percent > 0 else f"Loss: {profit_percent:.2f}%"
+
+                message = (
+                    f"{symbol} {timeframe}: {message_type}\n"
+                    f"Price: {current_price:.6f}\n"
+                    f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
+                    f"{profit_text}\n"
+                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı (reversal)\n"
                     f"Time: {now.strftime('%H:%M:%S')}"
                 )
+                await tg_send(message)
+
+                # Reset state (cooldown bilgisini koru)
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
-                    'remaining_ratio': 1.0,
-                    'last_signal_time': None, 'last_signal_type': None, 'entry_time': None,
-                    'tp1_hit': False, 'tp2_hit': False,
-                    'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+                    'highest_price': None, 'lowest_price': None,
+                    'avg_atr_ratio': None, 'remaining_ratio': 1.0,
+                    'last_signal_time': current_pos['last_signal_time'],
+                    'last_signal_type': current_pos['last_signal_type'],
+                    'entry_time': None, 'tp1_hit': False, 'tp2_hit': False
                 }
                 current_pos = signal_cache[key]
 
-        # ================== POZİSYON AÇILIŞI — BUY ==================
+        # Sinyal açılışı
         if buy_condition and current_pos['signal'] != 'buy':
-            cooldown_active = (
-                current_pos['last_signal_time'] and
-                current_pos['last_signal_type'] == 'buy' and
-                (now - current_pos['last_signal_time']) < timedelta(minutes=COOLDOWN_MINUTES)
-            )
-            if cooldown_active:
+            if current_pos['last_signal_time'] and current_pos['last_signal_type'] == 'buy' and (now - current_pos['last_signal_time']) < timedelta(minutes=COOLDOWN_MINUTES):
                 logger.info(f"{symbol} {timeframe}: BUY atlandı (cooldown)")
             else:
                 entry_price = float(closed_candle['close'])
-                atr_ratio = (atr_value / entry_price) if (np.isfinite(atr_value) and np.isfinite(entry_price) and entry_price > 0) else np.nan
-
-                eff_sl_mult = SL_MULTIPLIER + SL_BUFFER  # 2.1
-                sl_pct = clamp(eff_sl_mult * atr_ratio, MIN_SL_PCT, MAX_SL_PCT)
-                sl_price = entry_price * (1 - sl_pct)
-
-                if not np.isfinite(entry_price) or not np.isfinite(sl_price):
-                    logger.warning(f"Geçersiz giriş/SL ({symbol} {timeframe})")
-                    return
+                sl_price = entry_price - (SL_MULTIPLIER * atr_value + SL_BUFFER * atr_value)
                 if current_price <= sl_price + INSTANT_SL_BUFFER * atr_value:
                     logger.info(f"{symbol} {timeframe}: BUY atlandı (anında SL riski)")
                 else:
-                    tp1_pct = clamp(TP_MULTIPLIER1 * atr_ratio, MIN_TP_PCT, MAX_TP_PCT)
-                    tp2_pct = clamp(TP_MULTIPLIER2 * atr_ratio, MIN_TP_PCT, MAX_TP_PCT)
-                    tp1_price = entry_price * (1 + tp1_pct)
-                    tp2_price = entry_price * (1 + tp2_pct)
-
+                    tp1_price = entry_price + (TP_MULTIPLIER1 * atr_value)
+                    tp2_price = entry_price + (TP_MULTIPLIER2 * atr_value)
                     current_pos = {
-                        'signal': 'buy', 'entry_price': entry_price, 'sl_price': sl_price,
-                        'tp1_price': tp1_price, 'tp2_price': tp2_price,
+                        'signal': 'buy',
+                        'entry_price': entry_price,
+                        'sl_price': sl_price,
+                        'tp1_price': tp1_price,
+                        'tp2_price': tp2_price,
+                        'highest_price': entry_price,
+                        'lowest_price': None,
+                        'avg_atr_ratio': avg_atr_ratio,
                         'remaining_ratio': 1.0,
-                        'last_signal_time': now, 'last_signal_type': 'buy', 'entry_time': now,
-                        'tp1_hit': False, 'tp2_hit': False,
-                        'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+                        'last_signal_time': now,
+                        'last_signal_type': 'buy',
+                        'entry_time': now,
+                        'tp1_hit': False,
+                        'tp2_hit': False
                     }
                     signal_cache[key] = current_pos
-                    await tg_send(
-                        f"{symbol} {timeframe}: BUY (LONG) ✅\n"
-                        f"Entry:{entry_price:.6f}\nSL:{sl_price:.6f}\nTP1:{tp1_price:.6f}\nTP2:{tp2_price:.6f}\n"
-                        f"Time:{now.strftime('%H:%M:%S')}"
+                    message = (
+                        f"{symbol} {timeframe}: BUY (LONG) 🚀\n"
+                        f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
+                        f"Divergence: Bullish\n"
+                        f"Entry: {entry_price:.6f}\nSL: {sl_price:.6f}\nTP1: {tp1_price:.6f}\nTP2: {tp2_price:.6f}\n"
+                        f"Time: {now.strftime('%H:%M:%S')}"
                     )
+                    await tg_send(message)
 
-        # ================== POZİSYON AÇILIŞI — SELL ==================
         elif sell_condition and current_pos['signal'] != 'sell':
-            cooldown_active = (
-                current_pos['last_signal_time'] and
-                current_pos['last_signal_type'] == 'sell' and
-                (now - current_pos['last_signal_time']) < timedelta(minutes=COOLDOWN_MINUTES)
-            )
-            if cooldown_active:
+            if current_pos['last_signal_time'] and current_pos['last_signal_type'] == 'sell' and (now - current_pos['last_signal_time']) < timedelta(minutes=COOLDOWN_MINUTES):
                 logger.info(f"{symbol} {timeframe}: SELL atlandı (cooldown)")
             else:
                 entry_price = float(closed_candle['close'])
-                atr_ratio = (atr_value / entry_price) if (np.isfinite(atr_value) and np.isfinite(entry_price) and entry_price > 0) else np.nan
-
-                eff_sl_mult = SL_MULTIPLIER + SL_BUFFER
-                sl_pct = clamp(eff_sl_mult * atr_ratio, MIN_SL_PCT, MAX_SL_PCT)
-                sl_price = entry_price * (1 + sl_pct)
-
-                if not np.isfinite(entry_price) or not np.isfinite(sl_price):
-                    logger.warning(f"Geçersiz giriş/SL ({symbol} {timeframe})")
-                    return
+                sl_price = entry_price + (SL_MULTIPLIER * atr_value + SL_BUFFER * atr_value)
                 if current_price >= sl_price - INSTANT_SL_BUFFER * atr_value:
                     logger.info(f"{symbol} {timeframe}: SELL atlandı (anında SL riski)")
                 else:
-                    tp1_pct = clamp(TP_MULTIPLIER1 * atr_ratio, MIN_TP_PCT, MAX_TP_PCT)
-                    tp2_pct = clamp(TP_MULTIPLIER2 * atr_ratio, MIN_TP_PCT, MAX_TP_PCT)
-                    tp1_price = entry_price * (1 - tp1_pct)
-                    tp2_price = entry_price * (1 - tp2_pct)
-
+                    tp1_price = entry_price - (TP_MULTIPLIER1 * atr_value)
+                    tp2_price = entry_price - (TP_MULTIPLIER2 * atr_value)
                     current_pos = {
-                        'signal': 'sell', 'entry_price': entry_price, 'sl_price': sl_price,
-                        'tp1_price': tp1_price, 'tp2_price': tp2_price,
+                        'signal': 'sell',
+                        'entry_price': entry_price,
+                        'sl_price': sl_price,
+                        'tp1_price': tp1_price,
+                        'tp2_price': tp2_price,
+                        'highest_price': None,
+                        'lowest_price': entry_price,
+                        'avg_atr_ratio': avg_atr_ratio,
                         'remaining_ratio': 1.0,
-                        'last_signal_time': now, 'last_signal_type': 'sell', 'entry_time': now,
-                        'tp1_hit': False, 'tp2_hit': False,
-                        'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+                        'last_signal_time': now,
+                        'last_signal_type': 'sell',
+                        'entry_time': now,
+                        'tp1_hit': False,
+                        'tp2_hit': False
                     }
                     signal_cache[key] = current_pos
-                    await tg_send(
-                        f"{symbol} {timeframe}: SELL (SHORT) ✅\n"
-                        f"Entry:{entry_price:.6f}\nSL:{sl_price:.6f}\nTP1:{tp1_price:.6f}\nTP2:{tp2_price:.6f}\n"
-                        f"Time:{now.strftime('%H:%M:%S')}"
+                    message = (
+                        f"{symbol} {timeframe}: SELL (SHORT) 📉\n"
+                        f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
+                        f"Divergence: Bearish\n"
+                        f"Entry: {entry_price:.6f}\nSL: {sl_price:.6f}\nTP1: {tp1_price:.6f}\nTP2: {tp2_price:.6f}\n"
+                        f"Time: {now.strftime('%H:%M:%S')}"
                     )
+                    await tg_send(message)
 
-        # ================== POZİSYON YÖNETİMİ — LONG ==================
-        if signal_cache.get(key, {}).get('signal') == 'buy':
-            current_pos = signal_cache[key]
-            current_price = float(df['close'].iloc[-1])
+        # === Pozisyon yönetimi ===
+        if current_pos.get('signal') == 'buy':
+            current_price = float(df.iloc[-1]['close'])
+            # rapor amaçlı
+            if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
+                current_pos['highest_price'] = current_price
 
             # TP1
             if not current_pos['tp1_hit'] and current_price >= current_pos['tp1_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
-                current_pos['remaining_ratio'] -= 0.3
-                current_pos['sl_price'] = current_pos['entry_price']  # break-even
+                current_pos['remaining_ratio'] = max(0.0, current_pos['remaining_ratio'] - 0.3)
+                current_pos['sl_price'] = current_pos['entry_price']  # Break-even
                 current_pos['tp1_hit'] = True
-                await tg_send(
-                    f"{symbol} {timeframe}: TP1 Hit 🎯\nCur:{current_price:.6f}\nTP1:{current_pos['tp1_price']:.6f}\n"
-                    f"P/L:{profit_percent:.2f}%\n%30 kapandı, SL BE'ye alındı\n"
-                    f"Kalan:%{current_pos['remaining_ratio']*100:.0f}\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = (
+                    f"{symbol} {timeframe}: TP1 Hit 🚀\n"
+                    f"Cur: {current_price:.6f}\n"
+                    f"TP1: {current_pos['tp1_price']:.6f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"%30 satıldı, SL entry'ye çekildi: {current_pos['sl_price']:.6f}\n"
+                    f"Kalan %{current_pos['remaining_ratio']*100:.0f}\n"
+                    f"Time: {now.strftime('%H:%M:%S')}"
                 )
+                await tg_send(message)
 
             # TP2
-            elif not current_pos['tp2_hit'] and current_pos['tp1_hit'] and current_price >= current_pos['tp2_price']:
+            elif not current_pos['tp2_hit'] and current_price >= current_pos['tp2_price'] and current_pos['tp1_hit']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
-                current_pos['remaining_ratio'] -= 0.4
+                current_pos['remaining_ratio'] = max(0.0, current_pos['remaining_ratio'] - 0.4)
                 current_pos['tp2_hit'] = True
-                await tg_send(
-                    f"{symbol} {timeframe}: TP2 Hit 🎯🎯\nCur:{current_price:.6f}\nTP2:{current_pos['tp2_price']:.6f}\n"
-                    f"P/L:{profit_percent:.2f}%\n%40 kapandı, kalan %30 açık\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = (
+                    f"{symbol} {timeframe}: TP2 Hit 🚀\n"
+                    f"Cur: {current_price:.6f}\n"
+                    f"TP2: {current_pos['tp2_price']:.6f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"%40 satıldı, kalan %30 EMA/SMA çıkışına kadar\n"
+                    f"Time: {now.strftime('%H:%M:%S')}"
                 )
+                await tg_send(message)
 
-            # Klasik SL/BE
-            if current_price <= current_pos['sl_price']:
+            # ❗ EMA/SMA exit (bearish cross)
+            if exit_cross_long:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
-                await tg_send(
-                    f"{symbol} {timeframe}: STOP LONG ⛔\nPrice:{current_price:.6f}\nP/L:{profit_percent:.2f}%\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = (
+                    f"{symbol} {timeframe}: EMA/SMA EXIT (LONG) 🔁\n"
+                    f"Price: {current_price:.6f}\n"
+                    f"{'Profit:' if profit_percent >= 0 else 'Loss:'} {profit_percent:.2f}%\n"
+                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı (kesişim çıkışı)\n"
+                    f"Time: {now.strftime('%H:%M:%S')}"
                 )
+                await tg_send(message)
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
-                    'remaining_ratio': 1.0, 'last_signal_time': current_pos.get('last_signal_time'),
-                    'last_signal_type': current_pos.get('last_signal_type'), 'entry_time': None,
-                    'tp1_hit': False, 'tp2_hit': False,
-                    'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+                    'highest_price': None, 'lowest_price': None,
+                    'avg_atr_ratio': None, 'remaining_ratio': 1.0,
+                    'last_signal_time': current_pos['last_signal_time'],
+                    'last_signal_type': current_pos['last_signal_type'],
+                    'entry_time': None, 'tp1_hit': False, 'tp2_hit': False
                 }
                 return
 
-            # === Crossover EXIT (bar kapanışında) ===
-            ema13 = float(df['ema13'].iloc[-2])
-            sma34 = float(df['sma34'].iloc[-2])
-            close_ = float(df['close'].iloc[-2])
-            ema_sma_gap = abs(ema13 - sma34)
-            exit_ok = (close_ < ema13 < sma34) and (ema_sma_gap >= EXIT_HYST_ATR * float(df['atr'].iloc[-2]))
-            if exit_ok:
+            # SL tetik
+            if current_price <= current_pos['sl_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
-                await tg_send(
-                    f"{symbol} {timeframe}: CROSS EXIT LONG 🔚\nPrice:{current_price:.6f}\nP/L:{profit_percent:.2f}%\n"
-                    f"EMA13:{ema13:.6f} < SMA34:{sma34:.6f} (gap {ema_sma_gap:.6f})\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
-                )
+                if profit_percent > 0:
+                    message = (
+                        f"{symbol} {timeframe}: LONG 🚀\n"
+                        f"Price: {current_price:.6f}\n"
+                        f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
+                        f"Profit: {profit_percent:.2f}%\nPARAYI VURDUK 🚀\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {now.strftime('%H:%M:%S')}"
+                    )
+                else:
+                    message = (
+                        f"{symbol} {timeframe}: STOP LONG 📉\n"
+                        f"Price: {current_price:.6f}\n"
+                        f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
+                        f"Loss: {profit_percent:.2f}%\nSTOP 😞\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {now.strftime('%H:%M:%S')}"
+                    )
+                await tg_send(message)
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
-                    'remaining_ratio': 1.0, 'last_signal_time': current_pos.get('last_signal_time'),
-                    'last_signal_type': current_pos.get('last_signal_type'), 'entry_time': None,
-                    'tp1_hit': False, 'tp2_hit': False,
-                    'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+                    'highest_price': None, 'lowest_price': None,
+                    'avg_atr_ratio': None, 'remaining_ratio': 1.0,
+                    'last_signal_time': current_pos['last_signal_time'],
+                    'last_signal_type': current_pos['last_signal_type'],
+                    'entry_time': None, 'tp1_hit': False, 'tp2_hit': False
                 }
                 return
 
             signal_cache[key] = current_pos
 
-        # ================== POZİSYON YÖNETİMİ — SHORT ==================
-        elif signal_cache.get(key, {}).get('signal') == 'sell':
-            current_pos = signal_cache[key]
-            current_price = float(df['close'].iloc[-1])
+        elif current_pos.get('signal') == 'sell':
+            current_price = float(df.iloc[-1]['close'])
+            if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
+                current_pos['lowest_price'] = current_price
 
             # TP1
             if not current_pos['tp1_hit'] and current_price <= current_pos['tp1_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
-                current_pos['remaining_ratio'] -= 0.3
-                current_pos['sl_price'] = current_pos['entry_price']  # BE
+                current_pos['remaining_ratio'] = max(0.0, current_pos['remaining_ratio'] - 0.3)
+                current_pos['sl_price'] = current_pos['entry_price']  # Break-even
                 current_pos['tp1_hit'] = True
-                await tg_send(
-                    f"{symbol} {timeframe}: TP1 Hit 🎯\nCur:{current_price:.6f}\nTP1:{current_pos['tp1_price']:.6f}\n"
-                    f"P/L:{profit_percent:.2f}%\n%30 kapandı, SL BE'ye alındı\n"
-                    f"Kalan:%{current_pos['remaining_ratio']*100:.0f}\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = (
+                    f"{symbol} {timeframe}: TP1 Hit 🚀\n"
+                    f"Cur: {current_price:.6f}\n"
+                    f"TP1: {current_pos['tp1_price']:.6f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"%30 satıldı, SL entry'ye çekildi: {current_pos['sl_price']:.6f}\n"
+                    f"Kalan %{current_pos['remaining_ratio']*100:.0f}\n"
+                    f"Time: {now.strftime('%H:%M:%S')}"
                 )
+                await tg_send(message)
 
             # TP2
-            elif not current_pos['tp2_hit'] and current_pos['tp1_hit'] and current_price <= current_pos['tp2_price']:
+            elif not current_pos['tp2_hit'] and current_price <= current_pos['tp2_price'] and current_pos['tp1_hit']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
-                current_pos['remaining_ratio'] -= 0.4
+                current_pos['remaining_ratio'] = max(0.0, current_pos['remaining_ratio'] - 0.4)
                 current_pos['tp2_hit'] = True
-                await tg_send(
-                    f"{symbol} {timeframe}: TP2 Hit 🎯🎯\nCur:{current_price:.6f}\nTP2:{current_pos['tp2_price']:.6f}\n"
-                    f"P/L:{profit_percent:.2f}%\n%40 kapandı, kalan %30 açık\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = (
+                    f"{symbol} {timeframe}: TP2 Hit 🚀\n"
+                    f"Cur: {current_price:.6f}\n"
+                    f"TP2: {current_pos['tp2_price']:.6f}\n"
+                    f"Profit: {profit_percent:.2f}%\n"
+                    f"%40 satıldı, kalan %30 EMA/SMA çıkışına kadar\n"
+                    f"Time: {now.strftime('%H:%M:%S')}"
                 )
+                await tg_send(message)
 
-            # Klasik SL/BE
-            if current_price >= current_pos['sl_price']:
+            # ❗ EMA/SMA exit (bullish cross)
+            if exit_cross_short:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
-                await tg_send(
-                    f"{symbol} {timeframe}: STOP SHORT ⛔\nPrice:{current_price:.6f}\nP/L:{profit_percent:.2f}%\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
+                message = (
+                    f"{symbol} {timeframe}: EMA/SMA EXIT (SHORT) 🔁\n"
+                    f"Price: {current_price:.6f}\n"
+                    f"{'Profit:' if profit_percent >= 0 else 'Loss:'} {profit_percent:.2f}%\n"
+                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı (kesişim çıkışı)\n"
+                    f"Time: {now.strftime('%H:%M:%S')}"
                 )
+                await tg_send(message)
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
-                    'remaining_ratio': 1.0, 'last_signal_time': current_pos.get('last_signal_time'),
-                    'last_signal_type': current_pos.get('last_signal_type'), 'entry_time': None,
-                    'tp1_hit': False, 'tp2_hit': False,
-                    'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+                    'highest_price': None, 'lowest_price': None,
+                    'avg_atr_ratio': None, 'remaining_ratio': 1.0,
+                    'last_signal_time': current_pos['last_signal_time'],
+                    'last_signal_type': current_pos['last_signal_type'],
+                    'entry_time': None, 'tp1_hit': False, 'tp2_hit': False
                 }
                 return
 
-            # === Crossover EXIT (bar kapanışında) ===
-            ema13 = float(df['ema13'].iloc[-2])
-            sma34 = float(df['sma34'].iloc[-2])
-            close_ = float(df['close'].iloc[-2])
-            ema_sma_gap = abs(ema13 - sma34)
-            exit_ok = (close_ > ema13 > sma34) and (ema_sma_gap >= EXIT_HYST_ATR * float(df['atr'].iloc[-2]))
-            if exit_ok:
+            # SL tetik
+            if current_price >= current_pos['sl_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
-                await tg_send(
-                    f"{symbol} {timeframe}: CROSS EXIT SHORT 🔚\nPrice:{current_price:.6f}\nP/L:{profit_percent:.2f}%\n"
-                    f"EMA13:{ema13:.6f} > SMA34:{sma34:.6f} (gap {ema_sma_gap:.6f})\n"
-                    f"Time:{datetime.now(pytz.timezone('Europe/Istanbul')).strftime('%H:%M:%S')}"
-                )
+                if profit_percent > 0:
+                    message = (
+                        f"{symbol} {timeframe}: SHORT 🚀\n"
+                        f"Price: {current_price:.6f}\n"
+                        f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
+                        f"Profit: {profit_percent:.2f}%\nPARAYI VURDUK 🚀\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {now.strftime('%H:%M:%S')}"
+                    )
+                else:
+                    message = (
+                        f"{symbol} {timeframe}: STOP SHORT 📉\n"
+                        f"Price: {current_price:.6f}\n"
+                        f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
+                        f"Loss: {profit_percent:.2f}%\nSTOP 😞\n"
+                        f"Kalan %{current_pos['remaining_ratio']*100:.0f} satıldı\n"
+                        f"Time: {now.strftime('%H:%M:%S')}"
+                    )
+                await tg_send(message)
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
-                    'remaining_ratio': 1.0, 'last_signal_time': current_pos.get('last_signal_time'),
-                    'last_signal_type': current_pos.get('last_signal_type'), 'entry_time': None,
-                    'tp1_hit': False, 'tp2_hit': False,
-                    'trap_active': False, 'trap_high': None, 'trap_expire_idx': None
+                    'highest_price': None, 'lowest_price': None,
+                    'avg_atr_ratio': None, 'remaining_ratio': 1.0,
+                    'last_signal_time': current_pos['last_signal_time'],
+                    'last_signal_type': current_pos['last_signal_type'],
+                    'entry_time': None, 'tp1_hit': False, 'tp2_hit': False
                 }
                 return
 
@@ -760,7 +648,7 @@ async def check_signals(symbol, timeframe):
 # ================== Main ==================
 async def main():
     tz = pytz.timezone('Europe/Istanbul')
-    await tg_send("Bot başladı 🟢 " + datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S'))
+    await tg_send("Bot başladı, saat: " + datetime.now(tz).strftime('%H:%M:%S'))
 
     timeframes = ['4h']
     symbols = all_bybit_linear_usdt_symbols()
