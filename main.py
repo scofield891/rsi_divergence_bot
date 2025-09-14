@@ -43,6 +43,30 @@ LIQ_MIN_DVOL_USD = 0
 # Telegram rate-limit (eşzamanlı mesaj sayısı)
 TG_CONCURRENCY = 6
 
+# ================== Trap Skor (yalnızca derecelendirme, filtre DEĞİL) ==================
+USE_TRAP_SCORING = True
+CTX_BARS = 3            # kısa bağlam penceresi (son 3 kapalı mum)
+VOL_MA_WINDOW = 20
+VOL_Z_WINDOW  = 60      # robust Z için pencere
+ATR_Z_WINDOW  = 60
+
+# Ağırlıklar (toplam ≈100)
+W_WICK        = 22      # üst/alt fitil anomali
+W_VOL_SPIKE   = 22      # hacim z-spike
+W_RSI_EXT     = 14      # RSI aşırılık
+W_ATR_Z       = 12      # ATR z spike (volatilite şoku)
+W_MACD_CONTRA = 12      # momentum ters rejim
+W_BB_PROX     = 10      # BB banda yakınlık (temas riski)
+W_BODY_SHRINK = 8       # gövde küçülmesi (sıkışma sonrası spike tuzağı)
+
+# Etiket aralıkları
+def risk_label(score:int) -> str:
+    if score < 20:   return "Çok düşük risk (yeşil)"
+    if score < 40:   return "Düşük risk"
+    if score < 60:   return "Orta risk"
+    if score < 80:   return "Yüksek risk"
+    return "Aşırı risk (kırmızı)"
+
 # ================== Logging ==================
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -185,10 +209,31 @@ def get_atr_values(df, lookback_atr=18):
     avg_atr_ratio = float(atr_series.mean() / close_last) if len(atr_series) else np.nan
     return atr_value, avg_atr_ratio
 
+# === Ek hesaplar: Bollinger + robust vol/ATR z + fitil/gövde ===
+def calculate_bb(df, period=20, mult=2.0):
+    df['bb_mid'] = df['close'].rolling(period).mean()
+    df['bb_std'] = df['close'].rolling(period).std()
+    df['bb_upper'] = df['bb_mid'] + mult * df['bb_std']
+    df['bb_lower'] = df['bb_mid'] - mult * df['bb_std']
+    return df
+
+def robust_z(series: pd.Series, window: int) -> pd.Series:
+    med = series.rolling(window).median()
+    mad = series.rolling(window).apply(lambda x: np.median(np.abs(x - np.median(x))), raw=True)
+    denom = (1.4826 * mad).replace(0, np.nan)
+    return (series - med) / denom
+
+def candle_body_wicks(row):
+    o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
+    rng = max(h - l, 1e-12)
+    body = abs(c - o) / rng
+    upper_wick = (h - max(o, c)) / rng
+    lower_wick = (min(o, c) - l) / rng
+    return body, upper_wick, lower_wick
+
 def calculate_indicators(df, timeframe):
     if len(df) < 80:
         logger.warning("DF çok kısa, indikatör hesaplanamadı.")
-        return None
     closes = df['close'].values.astype(np.float64)
     df['ema13'] = calculate_ema(closes, span=13)
     df['sma34'] = calculate_sma(closes, period=34)
@@ -209,7 +254,131 @@ def calculate_indicators(df, timeframe):
     else:
         df['liq_ok'] = True
 
+    # === Trap skoru için ek kolonlar (SİNYALE DOKUNMUYOR) ===
+    if USE_TRAP_SCORING:
+        df = ensure_atr(df, period=14)
+        # BB
+        df = calculate_bb(df, period=20, mult=2.0)
+        # Hacim MA ve robust Z
+        vol = pd.Series(df['volume'].astype(float).values, index=df.index)
+        df['vol_ma'] = vol.rolling(VOL_MA_WINDOW).mean()
+        df['vol_z']  = robust_z(vol, VOL_Z_WINDOW)
+        # ATR robust Z
+        df['atr_z']  = robust_z(df['atr'].astype(float), ATR_Z_WINDOW)
+        # Fitiller/gövde (son mum için fonksiyon üzerinden alacağız)
     return df
+
+# ================== Trap Skor Hesabı (filtre DEĞİL) ==================
+def score_traps(df: pd.DataFrame):
+    """
+    Bull-trap (long girişine risk) ve Sell-trap (short girişine risk) puanları.
+    0-100 arası; sadece raporlanır, sinyali ETKİLEMEZ.
+    """
+    if not USE_TRAP_SCORING or df is None or len(df) < max(CTX_BARS+2, VOL_Z_WINDOW+2, ATR_Z_WINDOW+2):
+        return None
+
+    # Son kapalı mum ve bağlam dilimi
+    row = df.iloc[-2]
+    ctx = df.iloc[-(CTX_BARS+1):-1] if len(df) >= CTX_BARS+1 else df.iloc[-2:-1]
+
+    # Fitil/gövde
+    body_r, up_wick_r, low_wick_r = candle_body_wicks(row)
+    up_wick_ctx_max  = float(np.nanmax([candle_body_wicks(r)[1] for _, r in ctx.iterrows()])) if len(ctx) else up_wick_r
+    low_wick_ctx_max = float(np.nanmax([candle_body_wicks(r)[2] for _, r in ctx.iterrows()])) if len(ctx) else low_wick_r
+    body_ctx_mean    = float(np.nanmean([candle_body_wicks(r)[0] for _, r in ctx.iterrows()])) if len(ctx) else body_r
+
+    # Hacim & ATR z
+    vol_z  = float(row['vol_z'])  if 'vol_z'  in df.columns and pd.notna(row['vol_z'])  else 0.0
+    atr_z  = float(row['atr_z'])  if 'atr_z'  in df.columns and pd.notna(row['atr_z'])  else 0.0
+
+    # RSI
+    rsi    = float(row['rsi']) if pd.notna(row['rsi']) else 50.0
+
+    # MACD hist
+    macd_h = float(row['macd_hist']) if pd.notna(row['macd_hist']) else 0.0
+
+    # BB yakınlığı (üst/lower)
+    bb_mid   = float(row['bb_mid'])   if 'bb_mid'   in df.columns and pd.notna(row['bb_mid'])   else np.nan
+    bb_upper = float(row['bb_upper']) if 'bb_upper' in df.columns and pd.notna(row['bb_upper']) else np.nan
+    bb_lower = float(row['bb_lower']) if 'bb_lower' in df.columns and pd.notna(row['bb_lower']) else np.nan
+
+    def clip01(x): return float(max(0.0, min(1.0, x)))
+
+    # --- Bull-trap skoru (LONG için risk) ---
+    # Fitil: büyük üst fitil ve/veya ctx'te büyük üst fitil -> risk
+    wick_score_long = clip01(max(up_wick_r, up_wick_ctx_max)) * W_WICK
+
+    # Hacim spike
+    vol_score = clip01((vol_z - 1.5) / 2.0) * W_VOL_SPIKE  # z~1.5'tan sonra skalanır
+
+    # RSI aşırılığı
+    rsi_ex_long = clip01((rsi - 70.0) / 10.0)  # 70-80 bandı -> 0..1
+    rsi_score_long = rsi_ex_long * W_RSI_EXT
+
+    # ATR spike (volatilite şoku)
+    atr_score = clip01((atr_z - 1.0) / 2.0) * W_ATR_Z
+
+    # MACD kontra: hist <= 0 ise yukarı kırılımlarda momentum zayıf -> risk
+    macd_contra_long = 1.0 if macd_h <= 0 else 0.0
+    macd_score_long = macd_contra_long * W_MACD_CONTRA
+
+    # BB proximity: üst banda yakınlık
+    if np.isfinite(bb_mid) and np.isfinite(bb_upper) and bb_upper > bb_mid:
+        bb_prox_long = clip01((row['close'] - bb_mid) / (bb_upper - bb_mid))
+    else:
+        bb_prox_long = 0.0
+    bb_score_long = bb_prox_long * W_BB_PROX
+
+    # Gövde küçülmesi: ctx gövde ortalaması küçükse (sıkışma) + ani spike riskli
+    body_shrink = clip01(max(0.0, 0.5 - body_ctx_mean) / 0.5)  # 0.5 altı küçülmüş sayalım
+    body_shrink_score = body_shrink * W_BODY_SHRINK
+
+    bull_score = wick_score_long + vol_score + rsi_score_long + atr_score + macd_score_long + bb_score_long + body_shrink_score
+    bull_score = int(round(max(0.0, min(100.0, bull_score))))
+
+    # --- Sell-trap skoru (SHORT için risk, yani aşağı kırılım tuzağı) ---
+    # Büyük alt fitil ve/veya ctx alt fitil -> short tuzağı riski
+    wick_score_short = clip01(max(low_wick_r, low_wick_ctx_max)) * W_WICK
+
+    # Hacim spike benzer
+    vol_score_s = vol_score
+
+    # RSI aşırılığı (aşırı satım)
+    rsi_ex_short = clip01((30.0 - rsi) / 10.0)  # 30-20 -> 0..1
+    rsi_score_short = rsi_ex_short * W_RSI_EXT
+
+    # ATR spike
+    atr_score_s = atr_score
+
+    # MACD kontra: hist >= 0 ise aşağı kırılımda momentum zayıf -> short trap riski
+    macd_contra_short = 1.0 if macd_h >= 0 else 0.0
+    macd_score_short = macd_contra_short * W_MACD_CONTRA
+
+    # BB proximity: alt banda yakınlık
+    if np.isfinite(bb_mid) and np.isfinite(bb_lower) and bb_mid > bb_lower:
+        bb_prox_short = clip01((bb_mid - row['close']) / (bb_mid - bb_lower))
+    else:
+        bb_prox_short = 0.0
+    bb_score_short = bb_prox_short * W_BB_PROX
+
+    # Gövde küçülmesi
+    body_shrink_score_s = body_shrink * W_BODY_SHRINK
+
+    bear_score = wick_score_short + vol_score_s + rsi_score_short + atr_score_s + macd_score_short + bb_score_short + body_shrink_score_s
+    bear_score = int(round(max(0.0, min(100.0, bear_score))))
+
+    # Kısa breakdown stringleri (mesaja eklemek için)
+    bull_dbg = f"wick↑:{up_wick_ctx_max:.2f}, volZ:{vol_z:.2f}, RSI:{rsi:.0f}, ATRz:{atr_z:.2f}, MACDh:{macd_h:.3f}, BB↑:{bb_prox_long:.2f}, body_ctx:{body_ctx_mean:.2f}"
+    bear_dbg = f"wick↓:{low_wick_ctx_max:.2f}, volZ:{vol_z:.2f}, RSI:{rsi:.0f}, ATRz:{atr_z:.2f}, MACDh:{macd_h:.3f}, BB↓:{bb_prox_short:.2f}, body_ctx:{body_ctx_mean:.2f}"
+
+    return {
+        "bull_score": bull_score,
+        "bull_label": risk_label(bull_score),
+        "bull_dbg": bull_dbg,
+        "bear_score": bear_score,
+        "bear_label": risk_label(bear_score),
+        "bear_dbg": bear_dbg
+    }
 
 # ================== Sinyal Döngüsü ==================
 async def check_signals(symbol, timeframe):
@@ -242,7 +411,12 @@ async def check_signals(symbol, timeframe):
             if df is None or df.empty:
                 return
 
-        # İndikatörler
+        # Zaman damgasını indexe al
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
+            df.set_index('timestamp', inplace=True)
+
+        # İndikatörler (+ trap skor kolonları)
         df = calculate_indicators(df, timeframe)
         if df is None:
             return
@@ -353,11 +527,15 @@ async def check_signals(symbol, timeframe):
                 if current_pos['signal'] == 'buy':
                     profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
                     message_type = "LONG REVERSAL CLOSE 🚀" if profit_percent > 0 else "LONG REVERSAL STOP 📉"
-                    profit_text = f"Profit: {profit_percent:.2f}%" if profit_percent > 0 else f"Loss: {profit_percent:.2f}%"
+                    profit_text = f"Profit: {profit_percent:.2f}%"
+                    if profit_percent <= 0:
+                        profit_text = f"Loss: {profit_percent:.2f}%"
                 else:
                     profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
                     message_type = "SHORT REVERSAL CLOSE 🚀" if profit_percent > 0 else "SHORT REVERSAL STOP 📉"
-                    profit_text = f"Profit: {profit_percent:.2f}%" if profit_percent > 0 else f"Loss: {profit_percent:.2f}%"
+                    profit_text = f"Profit: {profit_percent:.2f}%"
+                    if profit_percent <= 0:
+                        profit_text = f"Loss: {profit_percent:.2f}%"
 
                 message = (
                     f"{symbol} {timeframe}: {message_type}\n"
@@ -379,6 +557,9 @@ async def check_signals(symbol, timeframe):
                     'entry_time': None, 'tp1_hit': False, 'tp2_hit': False
                 }
                 current_pos = signal_cache[key]
+
+        # === Trap skorlarını hazırla (mesajlara eklenecek) ===
+        trap_info = score_traps(df)
 
         # Sinyal açılışı
         if buy_condition and current_pos['signal'] != 'buy':
@@ -409,12 +590,20 @@ async def check_signals(symbol, timeframe):
                         'tp2_hit': False
                     }
                     signal_cache[key] = current_pos
+
+                    # Mesaja bull-trap skoru ekle
+                    if trap_info:
+                        bsc = trap_info['bull_score']; blb = trap_info['bull_label']; dbg = trap_info['bull_dbg']
+                        trap_text = f"\nTrap (Bull) Skor: {bsc}/100 — {blb}\n{dbg}"
+                    else:
+                        trap_text = ""
+
                     message = (
                         f"{symbol} {timeframe}: BUY (LONG) 🚀\n"
                         f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
                         f"Divergence: Bullish\n"
                         f"Entry: {entry_price:.6f}\nSL: {sl_price:.6f}\nTP1: {tp1_price:.6f}\nTP2: {tp2_price:.6f}\n"
-                        f"Time: {now.strftime('%H:%M:%S')}"
+                        f"Time: {now.strftime('%H:%M:%S')}{trap_text}"
                     )
                     await tg_send(message)
 
@@ -446,12 +635,20 @@ async def check_signals(symbol, timeframe):
                         'tp2_hit': False
                     }
                     signal_cache[key] = current_pos
+
+                    # Mesaja sell-trap skoru ekle
+                    if trap_info:
+                        ssc = trap_info['bear_score']; slb = trap_info['bear_label']; dbg = trap_info['bear_dbg']
+                        trap_text = f"\nTrap (Sell) Skor: {ssc}/100 — {slb}\n{dbg}"
+                    else:
+                        trap_text = ""
+
                     message = (
                         f"{symbol} {timeframe}: SELL (SHORT) 📉\n"
                         f"RSI_EMA: {closed_candle['rsi_ema']:.2f}\n"
                         f"Divergence: Bearish\n"
                         f"Entry: {entry_price:.6f}\nSL: {sl_price:.6f}\nTP1: {tp1_price:.6f}\nTP2: {tp2_price:.6f}\n"
-                        f"Time: {now.strftime('%H:%M:%S')}"
+                        f"Time: {now.strftime('%H:%M:%S')}{trap_text}"
                     )
                     await tg_send(message)
 
@@ -495,6 +692,10 @@ async def check_signals(symbol, timeframe):
                 await tg_send(message)
 
             # ❗ EMA/SMA exit (bearish cross)
+            ema_prev, sma_prev = df['ema13'].iloc[-3], df['sma34'].iloc[-3]
+            ema_last, sma_last = df['ema13'].iloc[-2], df['sma34'].iloc[-2]
+            exit_cross_long  = (pd.notna(ema_prev) and pd.notna(sma_prev) and pd.notna(ema_last) and pd.notna(sma_last)
+                                and (ema_prev >= sma_prev) and (ema_last < sma_last))
             if exit_cross_long:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100
                 message = (
@@ -587,6 +788,10 @@ async def check_signals(symbol, timeframe):
                 await tg_send(message)
 
             # ❗ EMA/SMA exit (bullish cross)
+            ema_prev, sma_prev = df['ema13'].iloc[-3], df['sma34'].iloc[-3]
+            ema_last, sma_last = df['ema13'].iloc[-2], df['sma34'].iloc[-2]
+            exit_cross_short = (pd.notna(ema_prev) and pd.notna(sma_prev) and pd.notna(ema_last) and pd.notna(sma_last)
+                                and (ema_prev <= sma_prev) and (ema_last > sma_last))
             if exit_cross_short:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100
                 message = (
