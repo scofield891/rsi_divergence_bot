@@ -1,7 +1,6 @@
-ccxt>=4.3
-python-telegram-bot>=20,<22
-numpy>=1.23
-pandas>=1.5
-pytz>=2023.3
-python-dotenv>=1.0
-httpx>=0.26
+ccxt>=4.3.0
+numpy>=1.26.0
+pandas>=2.2.0
+python-telegram-bot>=21.0.0
+pytz>=2024.1
+python-dotenv>=1.0.0  # .env için
