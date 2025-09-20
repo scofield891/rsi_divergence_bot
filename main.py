@@ -282,21 +282,23 @@ async def check_signals(symbol, timeframe):
             logger.info(f"{symbol} {timeframe}: Aynı mumda sinyal atlandı (flood koruma)")
             return
         # Trend yönü ve crossover
-        ema13_slice = df['ema13'].values[-LOOKBACK_CROSSOVER-1:-1]
-        sma34_slice = df['sma34'].values[-LOOKBACK_CROSSOVER-1:-1]
-        price_slice = df['close'].values[-LOOKBACK_CROSSOVER-1:-1]
+        ema13_slice = df['ema13'].values[-(LOOKBACK_CROSSOVER+1):-1]
+        sma34_slice = df['sma34'].values[-(LOOKBACK_CROSSOVER+1):-1]
+        price_slice = df['close'].values[-(LOOKBACK_CROSSOVER+1):-1]
         ema13_last = df['ema13'].iloc[-2]
         sma34_last = df['sma34'].iloc[-2]
         trend_long = ema13_last > sma34_last
         trend_short = ema13_last < sma34_last
         ema_sma_crossover_buy = False
         ema_sma_crossover_sell = False
-        for i in range(1, LOOKBACK_CROSSOVER + 1):
-            if ema13_slice[-i-1] <= sma34_slice[-i-1] and ema13_slice[-i] > sma34_slice[-i] and \
-               price_slice[-i] > sma34_slice[-i]:
+        n = min(len(ema13_slice), len(sma34_slice), len(price_slice))
+        for i in range(1, n):  # i: 1..n-1
+            e_prev, e_cur = ema13_slice[-i-1], ema13_slice[-i]
+            s_prev, s_cur = sma34_slice[-i-1], sma34_slice[-i]
+            p_cur = price_slice[-i]
+            if (e_prev <= s_prev) and (e_cur > s_cur) and (p_cur > s_cur):
                 ema_sma_crossover_buy = True
-            if ema13_slice[-i-1] >= sma34_slice[-i-1] and ema13_slice[-i] < sma34_slice[-i] and \
-               price_slice[-i] < sma34_slice[-i]:
+            if (e_prev >= s_prev) and (e_cur < s_cur) and (p_cur < s_cur):
                 ema_sma_crossover_sell = True
         # ADX filtre
         adx_last = df['adx'].iloc[-2]
