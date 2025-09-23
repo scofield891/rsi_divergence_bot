@@ -142,6 +142,29 @@ REQUIRE_DI_FOR_HARD = True # hard 0 için DI hizası şart mı
 REQUIRE_NTX_FOR_HARD = True # hard 0 için NTX rising şart mı
 EARLY_EXTRA_FILTER = True # flip sonrası ekstra filtreleri aç
 EARLY_TRAP_MARGIN = 3.0 # flip sonrası ilk sinyallerde trap sınırını 3 puan sıkılaştır
+# ==== SMI Divergence (EMA'dan tamamen bağımsız tetik) ====
+USE_SMI_DIVERGENCE = True
+SMI_DIV_LOOKBACK = 60
+SMI_DIV_PIVOT = 4
+SMI_DIV_MIN_SEP = 6
+SMI_DIV_TOL = 0.003
+
+# Divergence modunda EMA-temelli davranışlar:
+DIVERGENCE_USE_DEBOUNCE = False   # rejim-flip debounce'u SMI modunda kapat
+DIVERGENCE_USE_EMA_EXITS = True   # çıkışları EMA ile yapmak istersen True; sadece SL/TP olsun dersen False
+# ==== SMI Divergence (kol-özel güç/froth ayarları) ====
+DIVERGENCE_STRENGTH_MODE = "adaptive"   # "adaptive" | "off"
+DIVERGENCE_REQUIRE_DI = True            # DI hizası zorunlu mu
+DIVERGENCE_ADX_MIN = 10                 # 10 altı çok zayıf kabul
+DIVERGENCE_RISING_FALLBACK = True       # ADX düşük ama yükseliyorsa kabul et
+DIVERGENCE_ALLOW_NTX_OVERRIDE = True    # NTX eşik yakınında override
+DIVERGENCE_NTX_MARGIN = -2.0            # ntx_thr + margin (örn thr-2)
+
+# Divergence için froth korumasını gevşet
+DIVERGENCE_FROTH_K_ATR = 1.6            # |close-EMA10| <= K*ATR (EMA koluna göre daha geniş)
+DIVERGENCE_VOL_Z_MIN = 1.2     # katılım için min vol z-skoru
+DIVERGENCE_USE_OBV = True      # OBV eğimi yardımcı teyit
+DIVERGENCE_EMA10_CONFIRM = True# hafif yapışma teyidi (opsiyonel)
 # TT mesaj etiketleri
 def _risk_label(score: float) -> str:
     if score < 20: return "Çok düşük risk 🟢"
@@ -760,21 +783,116 @@ def volume_gate(df: pd.DataFrame, side: str, atr_ratio: float, symbol: str = "",
     need = dvol_ref * (mult * relax)
     ok = (dvol_usd > need)
     return (ok, f"dvol={dvol_usd:.0f} need>{need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f})")
+def _obv_up(df, win=OBV_SLOPE_WIN):  # long teyit
+    s = df['obv'].iloc[-(win+1):-1].astype(float)
+    if s.size < 3 or s.isna().any(): return False
+    x = np.arange(len(s)); m,_ = np.polyfit(x, s.values, 1)
+    return m > 0
+
+def _obv_dn(df, win=OBV_SLOPE_WIN):  # short teyit
+    s = df['obv'].iloc[-(win+1):-1].astype(float)
+    if s.size < 3 or s.isna().any(): return False
+    x = np.arange(len(s)); m,_ = np.polyfit(x, s.values, 1)
+    return m < 0
+
+def divergence_strength_ok(df, side: str,
+                           adx_last: float,
+                           adx_rise: bool,
+                           ntx_rise_fast: bool,
+                           vol_z_min: float = DIVERGENCE_VOL_Z_MIN) -> bool:
+    if DIVERGENCE_STRENGTH_MODE == "off":
+        return True  # tamamen serbest
+    last = df.iloc[-2]
+    vol_z = float(last.get('vol_z', 0.0))
+    obv_ok = (_obv_up(df) if side == "long" else _obv_dn(df)) if DIVERGENCE_USE_OBV else False
+    ema10_conf = True
+    if DIVERGENCE_EMA10_CONFIRM:
+        ema10 = float(last['ema10'])
+        close = float(last['close'])
+        ema10_conf = (close > ema10) if side == "long" else (close < ema10)
+
+    # 1) ADX >= 15 → güçlü: direkt geç
+    if adx_last >= ADX_THRESHOLD:
+        return True and ema10_conf
+
+    # 2) ADX 10–15: ADX rising (hybrid yeter), + katılım teyidi (vol_z ya da obv)
+    if DIVERGENCE_ADX_MIN <= adx_last < ADX_THRESHOLD:
+        if adx_rise and (vol_z >= vol_z_min or obv_ok):
+            return True and ema10_conf
+        return False
+
+    # 3) ADX < 10: NTX hızlı yükseliş + katılım şart
+    if adx_last < DIVERGENCE_ADX_MIN:
+        if ntx_rise_fast and (vol_z >= vol_z_min or obv_ok):
+            return True and ema10_conf
+        return False
+def _find_pivots(series: pd.Series, left: int, right: int, kind: str) -> list[tuple[pd.Timestamp, float]]:
+    s = series.astype(float)
+    pivots = []
+    for i in range(left, len(s) - right):
+        window = s.iloc[i-left:i+right+1]
+        if kind == 'low' and s.iloc[i] == window.min():
+            pivots.append((series.index[i], s.iloc[i]))
+        if kind == 'high' and s.iloc[i] == window.max():
+            pivots.append((series.index[i], s.iloc[i]))
+    return pivots
+
+def _last_two_valid(pivots: list[tuple[pd.Timestamp, float]], min_sep: int, in_idx: pd.DatetimeIndex):
+    if len(pivots) < 2: return None
+    as_pos = [(in_idx.get_indexer_for([t])[0], v) for t, v in pivots]
+    as_pos = [p for p in as_pos if p[0] >= 0]
+    tail = []
+    for pos, val in reversed(as_pos):
+        if not tail: tail.append((pos, val))
+        else:
+            if abs(pos - tail[-1][0]) >= min_sep:
+                tail.append((pos, val)); break
+    if len(tail) < 2: return None
+    return sorted(tail, key=lambda x: x[0])
+def detect_smi_divergence(df: pd.DataFrame,
+                          lookback: int = SMI_DIV_LOOKBACK,
+                          pivot: int = SMI_DIV_PIVOT,
+                          min_sep: int = SMI_DIV_MIN_SEP,
+                          tol: float = SMI_DIV_TOL) -> dict:
+    sub = df.iloc[-(lookback+1):-1].copy()
+    if sub.shape[0] < (pivot*2 + 5) or 'smi' not in sub:
+        return dict(bullish_regular=False, bearish_regular=False,
+                    bullish_hidden=False, bearish_hidden=False)
+    p = sub['close'].astype(float); o = sub['smi'].astype(float)
+    lows_p = _find_pivots(p, pivot, pivot, 'low');  highs_p = _find_pivots(p, pivot, pivot, 'high')
+    lows_o = _find_pivots(o, pivot, pivot, 'low');  highs_o = _find_pivots(o, pivot, pivot, 'high')
+    idx = sub.index
+    lp = _last_two_valid(lows_p,  min_sep, idx); lo = _last_two_valid(lows_o,  min_sep, idx)
+    hp = _last_two_valid(highs_p, min_sep, idx); ho = _last_two_valid(highs_o, min_sep, idx)
+
+    bull_reg = bear_reg = bull_hid = bear_hid = False
+    if lp and lo:
+        (_, p1), (_, p2) = lp; (_, o1), (_, o2) = lo
+        if p2 < p1*(1-tol) and o2 > o1*(1+tol): bull_reg = True      # regular bullish
+        if p2 > p1*(1+tol) and o2 < o1*(1-tol): bull_hid = True      # hidden bullish
+    if hp and ho:
+        (_, p1), (_, p2) = hp; (_, o1), (_, o2) = ho
+        if p2 > p1*(1+tol) and o2 < o1*(1-tol): bear_reg = True      # regular bearish
+        if p2 < p1*(1-tol) and o2 > o1*(1+tol): bear_hid = True      # hidden bearish
+    return dict(bullish_regular=bull_reg, bearish_regular=bear_reg,
+                bullish_hidden=bull_hid, bearish_hidden=bear_hid)
 # ================== Sinyal Döngüsü ==================
 async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
     try:
         # --- Veri ---
         if TEST_MODE:
-            closes = np.abs(np.cumsum(np.random.randn(200))) * 0.05 + 0.3
-            highs = closes + np.random.rand(200) * 0.02 * closes
-            lows = closes - np.random.rand(200) * 0.02 * closes
-            volumes = np.random.rand(200) * 10000
-            ohlcv = [[0, closes[i], highs[i], lows[i], closes[i], volumes[i]] for i in range(200)]
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            N = 200
+            ts0 = int(time.time()*1000) - N*4*60*60*1000  # 4h mum için geçmişe sar
+            closes = np.abs(np.cumsum(np.random.randn(N))) * 0.05 + 0.3
+            highs = closes + np.random.rand(N) * 0.02 * closes
+            lows  = closes - np.random.rand(N) * 0.02 * closes
+            volumes = np.random.rand(N) * 10000
+            ohlcv = [[ts0 + i*4*60*60*1000, closes[i], highs[i], lows[i], closes[i], volumes[i]] for i in range(N)]
+            df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
             logger.info(f"Test modu: {symbol} {timeframe}")
         else:
-            limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40, SCORING_WIN + 5)
+            limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40, SCORING_WIN + 5, SMI_DIV_LOOKBACK + 10)
             ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             if df is None or df.empty or len(df) < 80:
@@ -868,6 +986,9 @@ async def check_signals(symbol, timeframe='4h'):
         ema_gap = abs(float(df['close'].iloc[-2]) - float(df['ema10'].iloc[-2]))
         froth_ok_long = (ema_gap <= K_long * atr_value) or trend_strong_long # soft-AND
         froth_ok_short = (ema_gap <= K_short * atr_value) or trend_strong_short # soft-AND
+        # Divergence için daha gevşek froth
+        froth_ok_long_div = (ema_gap <= DIVERGENCE_FROTH_K_ATR * atr_value) or trend_strong_long
+        froth_ok_short_div = (ema_gap <= DIVERGENCE_FROTH_K_ATR * atr_value) or trend_strong_short
         # Mum rengi, closed_candle vs.
         closed_candle = df.iloc[-2]
         current_price = float(df['close'].iloc[-1]) if pd.notna(df['close'].iloc[-1]) else np.nan
@@ -914,17 +1035,61 @@ async def check_signals(symbol, timeframe='4h'):
             trig_short = fresh_dn
             ema_setup_buy = regime_long and trig_long and dist_ok_long # minimum filtre
             ema_setup_sell = regime_short and trig_short and dist_ok_short
-        # --- Al / Sat koşulları ---
-        buy_condition = (
+        # --- SMI Divergence (EMA'dan bağımsız tetik) ---
+        div = detect_smi_divergence(df)
+        div_bull = div['bullish_regular'] or div['bullish_hidden']
+        div_bear = div['bearish_regular'] or div['bearish_hidden']
+        logger.info(f"{symbol} {timeframe} SMI_DIV bull={div_bull} bear={div_bear}")
+        # Divergence için özel güç kapısı
+        div_strength_long = divergence_strength_ok(
+            df, "long",
+            adx_last=adx_last,
+            adx_rise=rising_adx,
+            ntx_rise_fast=ntx_rising_hyb_long
+        )
+        div_strength_short = divergence_strength_ok(
+            df, "short",
+            adx_last=adx_last,
+            adx_rise=rising_adx,
+            ntx_rise_fast=ntx_rising_hyb_short
+        )
+        # 4.a) EMA tabanlı giriş (AYNEN KALIR)
+        buy_condition_ema = (
             ema_setup_buy and ok_l and smi_condition_long and
             str_ok and dir_long_ok and trap_ok_long and froth_ok_long and is_green and
             (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
         )
-        sell_condition = (
+        sell_condition_ema = (
             ema_setup_sell and ok_s and smi_condition_short and
             str_ok and dir_short_ok and trap_ok_short and froth_ok_short and is_red and
             (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
         )
+
+        # 4.b) SMI Divergence tabanlı giriş (EMA ile ilgili hiçbir şart yok)
+        buy_condition_div = (
+            USE_SMI_DIVERGENCE and div_bull and ok_l and
+            div_strength_long and trap_ok_long and froth_ok_long_div and is_green
+        )
+        sell_condition_div = (
+            USE_SMI_DIVERGENCE and div_bear and ok_s and
+            div_strength_short and trap_ok_short and froth_ok_short_div and is_red
+        )
+
+        # 4.c) Debounce (rejim-flip bekleme) — divergence için kapatılabilir
+        if not DIVERGENCE_USE_DEBOUNCE:
+            buy_condition = buy_condition_ema or buy_condition_div
+            sell_condition = sell_condition_ema or sell_condition_div
+        else:
+            buy_condition = (debounce_ok_long and (buy_condition_ema or buy_condition_div))
+            sell_condition = (debounce_ok_short and (sell_condition_ema or sell_condition_div))
+
+        # Log’ta hangi koldan geldiğini de gör
+        if buy_condition:
+            logger.info(f"{symbol} {timeframe} ENTRY_LONG via " +
+                        ("DIV" if buy_condition_div and not buy_condition_ema else "EMA/DIV" if buy_condition_div and buy_condition_ema else "EMA"))
+        if sell_condition:
+            logger.info(f"{symbol} {timeframe} ENTRY_SHORT via " +
+                        ("DIV" if sell_condition_div and not sell_condition_ema else "EMA/DIV" if sell_condition_div and sell_condition_ema else "EMA"))
         key = f"{symbol}_{timeframe}"
         current_pos = signal_cache.get(key, {
             'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
@@ -964,14 +1129,11 @@ async def check_signals(symbol, timeframe='4h'):
         debounce_ok_short = not (reg_dir == 'short' and bars_flip < req_short)
         logger.info(f"{symbol} {timeframe} regime={reg_dir} bars_since_flip={bars_flip} req_long={req_long} req_short={req_short} "
                     f"deb_ok_L={debounce_ok_long} deb_ok_S={debounce_ok_short}")
-        # buy/sell koşullarına debounce'ı ekle
-        buy_condition = debounce_ok_long and buy_condition
-        sell_condition = debounce_ok_short and sell_condition
         # Flip sonrası ekstra filtre (opsiyonel ama önerilir)
         if EARLY_EXTRA_FILTER:
-            if reg_dir == 'long' and not debounce_ok_long: # flipin erken fazındayız
+            if buy_condition_ema and (reg_dir == 'long') and not debounce_ok_long:
                 buy_condition = buy_condition and retest_long and di_align_long and (bull_score["score"] <= TRAP_MAX_SCORE - EARLY_TRAP_MARGIN)
-            if reg_dir == 'short' and not debounce_ok_short:
+            if sell_condition_ema and (reg_dir == 'short') and not debounce_ok_short:
                 sell_condition = sell_condition and retest_short and di_align_short and (bear_score["score"] <= TRAP_MAX_SCORE - EARLY_TRAP_MARGIN)
         logger.info(f"{symbol} {timeframe} EMA buy:{ema_setup_buy} sell:{ema_setup_sell}")
         logger.info(f"{symbol} {timeframe} buy:{buy_condition} sell:{sell_condition} riskL:{bull_score['label']} riskS:{bear_score['label']}")
@@ -990,6 +1152,11 @@ async def check_signals(symbol, timeframe='4h'):
         # Acil exit: rejim kırılımı (30/90 ters)
         regime_break_long = e30_last < e90_last
         regime_break_short = e30_last > e90_last
+        if not DIVERGENCE_USE_EMA_EXITS:
+            exit_cross_long = False
+            regime_break_long = False
+            exit_cross_short = False
+            regime_break_short = False
         logger.info(f"{symbol} {timeframe} exit_cross_long:{exit_cross_long} exit_cross_short:{exit_cross_short} regime_break_long:{regime_break_long} regime_break_short:{regime_break_short}")
         # === Reversal kapama ===
         if (buy_condition or sell_condition) and (current_pos['signal'] is not None):
@@ -1041,6 +1208,8 @@ async def check_signals(symbol, timeframe='4h'):
                     tp1_price = entry_price + (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price + (TP_MULTIPLIER2 * atr_value)
                     trap_line = f"\nTrap Risk (Bull): {int(bull_score['score'])}/100 → {bull_score['label']}" if USE_TRAP_SCORING else ""
+                    source_tag = "[DIV]" if (buy_condition_div and not buy_condition_ema) else "[EMA]"
+                    div_tag = "[DIV reg]" if div['bullish_regular'] else "[DIV hid]" if div['bullish_hidden'] else ""
                     current_pos = {
                         'signal': 'buy', 'entry_price': entry_price, 'sl_price': sl_price,
                         'tp1_price': tp1_price, 'tp2_price': tp2_price, 'highest_price': entry_price,
@@ -1051,7 +1220,7 @@ async def check_signals(symbol, timeframe='4h'):
                     }
                     signal_cache[key] = current_pos
                     await enqueue_message(
-                        f"{symbol} {timeframe}: BUY (LONG) 🚀\n"
+                        f"{symbol} {timeframe}: {source_tag}{div_tag} BUY (LONG) 🚀\n"
                         f"Entry: {fmt_sym(symbol, entry_price)}\n"
                         f"SL: {fmt_sym(symbol, sl_price)}\n"
                         f"TP1: {fmt_sym(symbol, tp1_price)}\n"
@@ -1085,6 +1254,8 @@ async def check_signals(symbol, timeframe='4h'):
                     tp1_price = entry_price - (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price - (TP_MULTIPLIER2 * atr_value)
                     trap_line = f"\nTrap Risk (Bear): {int(bear_score['score'])}/100 → {bear_score['label']}" if USE_TRAP_SCORING else ""
+                    source_tag = "[DIV]" if (sell_condition_div and not sell_condition_ema) else "[EMA]"
+                    div_tag = "[DIV reg]" if div['bearish_regular'] else "[DIV hid]" if div['bearish_hidden'] else ""
                     current_pos = {
                         'signal': 'sell', 'entry_price': entry_price, 'sl_price': sl_price,
                         'tp1_price': tp1_price, 'tp2_price': tp2_price, 'highest_price': None,
@@ -1095,7 +1266,7 @@ async def check_signals(symbol, timeframe='4h'):
                     }
                     signal_cache[key] = current_pos
                     await enqueue_message(
-                        f"{symbol} {timeframe}: SELL (SHORT) 📉\n"
+                        f"{symbol} {timeframe}: {source_tag}{div_tag} SELL (SHORT) 📉\n"
                         f"Entry: {fmt_sym(symbol, entry_price)}\n"
                         f"SL: {fmt_sym(symbol, sl_price)}\n"
                         f"TP1: {fmt_sym(symbol, tp1_price)}\n"
@@ -1170,6 +1341,77 @@ async def check_signals(symbol, timeframe='4h'):
                 }
                 save_state()
                 return
+            signal_cache[key] = current_pos
+        # === Pozisyon yönetimi: SHORT ===
+        if current_pos['signal'] == 'sell':
+            if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
+                current_pos['lowest_price'] = current_price
+
+            # TP1
+            if not current_pos['tp1_hit'] and current_price <= current_pos['tp1_price']:
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                current_pos['remaining_ratio'] -= 0.3
+                current_pos['sl_price'] = current_pos['entry_price']  # BE
+                current_pos['tp1_hit'] = True
+                await enqueue_message(
+                    f"{symbol} {timeframe}: TP1 Hit 🎯\n"
+                    f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}\n"
+                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, Stop girişe çekildi."
+                )
+                save_state()
+
+            # TP2
+            elif not current_pos['tp2_hit'] and current_price <= current_pos['tp2_price'] and current_pos['tp1_hit']:
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                current_pos['remaining_ratio'] -= 0.4
+                current_pos['tp2_hit'] = True
+                await enqueue_message(
+                    f"{symbol} {timeframe}: TP2 Hit 🎯🎯\n"
+                    f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}\n"
+                    f"P/L: {profit_percent:+.2f}% | %40 kapandı, kalan %30 açık."
+                )
+                save_state()
+
+            # EMA exit (normal veya acil)
+            if exit_cross_short or regime_break_short:
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                await enqueue_message(
+                    f"{symbol} {timeframe}: EMA EXIT (SHORT) 🔁\n"
+                    f"Price: {fmt_sym(symbol, current_price)}\n"
+                    f"P/L: {profit_percent:+.2f}%\n"
+                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
+                )
+                now = datetime.now(tz)
+                signal_cache[key] = {
+                    'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
+                    'highest_price': None, 'lowest_price': None, 'avg_atr_ratio': None,
+                    'remaining_ratio': 1.0, 'last_signal_time': now, 'last_signal_type': 'sell', 'entry_time': None,
+                    'tp1_hit': False, 'tp2_hit': False, 'last_bar_time': None,
+                    'regime_dir': current_pos.get('regime_dir'), 'bars_since_flip': current_pos.get('bars_since_flip', 9999), 'last_regime_bar': current_pos.get('last_regime_bar')
+                }
+                save_state()
+                return
+
+            # SL tetik
+            if current_price >= current_pos['sl_price']:
+                profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                await enqueue_message(
+                    f"{symbol} {timeframe}: STOP SHORT ⛔\n"
+                    f"Price: {fmt_sym(symbol, current_price)}\n"
+                    f"P/L: {profit_percent:+.2f}%\n"
+                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
+                )
+                now = datetime.now(tz)
+                signal_cache[key] = {
+                    'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
+                    'highest_price': None, 'lowest_price': None, 'avg_atr_ratio': None,
+                    'remaining_ratio': 1.0, 'last_signal_time': now, 'last_signal_type': 'sell', 'entry_time': None,
+                    'tp1_hit': False, 'tp2_hit': False, 'last_bar_time': None,
+                    'regime_dir': current_pos.get('regime_dir'), 'bars_since_flip': current_pos.get('bars_since_flip', 9999), 'last_regime_bar': current_pos.get('last_regime_bar')
+                }
+                save_state()
+                return
+
             signal_cache[key] = current_pos
         # Sayaçlar (telemetri, check_signals sonuna ekle)
         blocked_by_froth = 0 if froth_ok_long else 1
