@@ -15,14 +15,29 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from logging.handlers import RotatingFileHandler
 import json # state persist için
+from telegram.request import HTTPXRequest
+# ================== Logging ==================
+logger = logging.getLogger()
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    file_handler = RotatingFileHandler('bot.log', maxBytes=5_000_000, backupCount=3)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 # ================== Sabit Değerler ==================
-# Güvenlik: ENV zorunlu
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-if not BOT_TOKEN or not CHAT_ID:
-    raise RuntimeError("BOT_TOKEN ve CHAT_ID ortam değişkenlerini ayarla.")
+CHAT_ID   = os.getenv("CHAT_ID")
+
+# ENV yoksa test moduna geç (ve bir daha ezme)
 TEST_MODE = False
-VERBOSE_LOG = False # detaylı log için True yap
+if not BOT_TOKEN or not CHAT_ID:
+    logger.warning("ENV yok → TEST_MODE=True (Telegram kapalı).")
+    TEST_MODE = True
+
+VERBOSE_LOG = False
 # ---- Sinyal / Risk Parametreleri ----
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8 # SL = 1.8 x ATR
@@ -82,22 +97,25 @@ TRAP_DYN_USE = False # Kaldırıldı
 TRAP_BASE_MAX = 39.0 # Sabit eşik (tweak)
 # ==== Hacim Filtresi ====
 VOLUME_GATE_MODE = "lite"
-VOL_REF_WIN = 20
-VOL_ATR_K = 2.5
-VOL_ATR_CAP = 0.25
-VOL_MIN_BASE = 1.05
+
 VOL_LIQ_USE = True
 VOL_LIQ_ROLL = 60
-VOL_LIQ_QUANTILE = 0.60
-VOL_LIQ_MIN_DVOL_USD = 30_000
+VOL_LIQ_QUANTILE = 0.50        # 0.60 → 0.50
+VOL_LIQ_MIN_DVOL_USD = 20_000  # 30k → 20k
 VOL_LIQ_MIN_DVOL_LO = 10_000
 VOL_LIQ_MIN_DVOL_HI = 150_000
-VOL_LIQ_MED_FACTOR = 0.30
+VOL_LIQ_MED_FACTOR = 0.20       # 0.30 → 0.20
+
+VOL_REF_WIN = 20
+VOL_ATR_K = 1.8                 # 2.5 → 1.8
+VOL_ATR_CAP = 0.18              # 0.25 → 0.18
+VOL_MIN_BASE = 1.00
+
 LIQ_BYPASS_GOOD_SPIKE = True
-GOOD_SPIKE_Z = 2.0
-GOOD_BODY_MIN = 0.60
-GOOD_UPWICK_MAX = 0.20
-GOOD_DNWICK_MAX = 0.20
+GOOD_SPIKE_Z = 1.8              # 2.0 → 1.8
+GOOD_BODY_MIN = 0.55            # 0.60 → 0.55
+GOOD_UPWICK_MAX = 0.22          # 0.20 → 0.22
+GOOD_DNWICK_MAX = 0.22          # 0.20 → 0.22
 VOL_Z_GOOD = 2.0
 TRAP_WICK_MIN = 0.45
 TRAP_BB_NEAR = 0.80
@@ -170,17 +188,6 @@ def _risk_label(score: float) -> str:
     if score < 60: return "Orta risk ⚠️"
     if score < 80: return "Yüksek risk 🟠"
     return "Aşırı risk 🔴"
-# ================== Logging ==================
-logger = logging.getLogger()
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    file_handler = RotatingFileHandler('bot.log', maxBytes=5_000_000, backupCount=3)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
 # ================== Borsa & Bot ==================
@@ -204,10 +211,12 @@ def configure_exchange_session(exchange, pool=50):
     s.mount('http://', adapter)
     exchange.session = s
 configure_exchange_session(exchange, pool=50)
-telegram_bot = telegram.Bot(
-    token=BOT_TOKEN,
-    request=telegram.request.HTTPXRequest(connection_pool_size=20, pool_timeout=30.0)
-)
+telegram_bot = None
+if not TEST_MODE:
+    telegram_bot = telegram.Bot(
+        token=BOT_TOKEN,
+        request=HTTPXRequest(connection_pool_size=20, pool_timeout=30.0)
+    )
 # ================== Global State ==================
 signal_cache = {}
 message_queue = asyncio.Queue(maxsize=1000)
@@ -281,8 +290,12 @@ async def message_sender():
     while True:
         message = await message_queue.get()
         try:
-            await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
-            await asyncio.sleep(1)
+            if TEST_MODE or telegram_bot is None:
+                # sessizce tüket
+                await asyncio.sleep(0)
+            else:
+                await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+                await asyncio.sleep(1)
         except (telegram.error.RetryAfter, telegram.error.TimedOut) as e:
             wait_time = getattr(e, 'retry_after', 5) + 2
             logger.warning(f"Telegram: RetryAfter, {wait_time-2}s bekle")
@@ -290,7 +303,8 @@ async def message_sender():
             await enqueue_message(message)
         except Exception as e:
             logger.error(f"Telegram mesaj hatası: {str(e)}")
-        message_queue.task_done()
+        finally:
+            message_queue.task_done()
 # ================== Rate-limit Dostu Fetch ==================
 async def fetch_ohlcv_async(symbol, timeframe, limit):
     global _last_call_ts
@@ -461,7 +475,10 @@ def calculate_indicators(df, symbol, timeframe):
         logger.warning(f"DF çok kısa ({len(df)}), indikatör hesaplanamadı.")
         return None, None, None, None, None, None, None
     if 'timestamp' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
+        if np.issubdtype(df['timestamp'].dtype, np.integer):
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
+        else:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
         df.set_index('timestamp', inplace=True)
     closes = df['close'].values.astype(np.float64)
     df['ema10'] = calculate_ema(closes, EMA_FAST)
@@ -725,25 +742,30 @@ def trend_relax_factor(adx_last, ntx_last=None, ntx_thr=None):
         s += max(0.0, (adx_last - 15.0) / 20.0) * 0.6
     if ntx_last is not None and ntx_thr is not None and np.isfinite(ntx_last) and np.isfinite(ntx_thr):
         s += max(0.0, (ntx_last - ntx_thr) / 15.0) * 0.4
-    return 1.0 - 0.25 * min(1.0, s) # en fazla %25 gevşet
+    return 1.0 - 0.35 * min(1.0, s)  # en fazla %35 gevşet
 def volume_gate(df: pd.DataFrame, side: str, atr_ratio: float, symbol: str = "", relax: float = 1.0) -> tuple[bool, str]:
     if len(df) < max(VOL_LIQ_ROLL+2, VOL_REF_WIN+2):
         return False, "data_short"
+
     last = df.iloc[-2]
-    vol = float(last['volume']); close = float(last['close'])
-    dvol_usd = vol * close
-    # 0) Likidite (yumuşak + adaptif)
+    close = float(last['close']); vol = float(last['volume'])
+    dvol_usd = close * vol
+
+    base = symbol.split('/')[0]
+    is_major = base in {"BTC", "ETH"}
+
+    # ---------- 1) HARD_FLOOR (mutlak taban) ----------
     if VOL_LIQ_USE and not TEST_MODE:
         dv = (df['close'] * df['volume']).astype(float)
         roll = dv.rolling(VOL_LIQ_ROLL, min_periods=VOL_LIQ_ROLL)
         q = roll.apply(lambda x: np.nanquantile(x, VOL_LIQ_QUANTILE), raw=True)
         qv = float(q.iloc[-2]) if pd.notna(q.iloc[-2]) else 0.0
+
         dyn_min = _dynamic_liq_floor(dv)
-        base = symbol.split('/')[0]
-        is_major = base in {"BTC", "ETH"}
         if is_major:
             dyn_min = max(dyn_min, VOL_LIQ_MIN_DVOL_USD)
-        min_required = max(qv, dyn_min)
+        hard_min = max(qv, dyn_min)
+
         liq_bypass = False
         if LIQ_BYPASS_GOOD_SPIKE:
             vol_z = float(last.get('vol_z', np.nan))
@@ -752,35 +774,36 @@ def volume_gate(df: pd.DataFrame, side: str, atr_ratio: float, symbol: str = "",
                 if (side == "long" and body >= GOOD_BODY_MIN and up <= GOOD_UPWICK_MAX) or \
                    (side == "short" and body >= GOOD_BODY_MIN and dn <= GOOD_DNWICK_MAX):
                     liq_bypass = True
-        if (dvol_usd < min_required) and not liq_bypass:
-            return False, f"liq_gate dvol={dvol_usd:.0f} < min={min_required:.0f} (q{int(VOL_LIQ_QUANTILE*100)}={qv:.0f}, dyn={dyn_min:.0f})"
-    # 1) Referans hacim (dolar bazlı, sade)
+
+        if (dvol_usd < hard_min) and not liq_bypass:
+            return False, f"HARD_FLOOR dvol={dvol_usd:.0f} < min={hard_min:.0f} (q{int(VOL_LIQ_QUANTILE*100)}={qv:.0f}, dyn={dyn_min:.0f})"
+
+    # ---------- 2) SOFT_GATE (referans + ATR + trend relax) ----------
     dvol_ref = float((df['close']*df['volume']).rolling(VOL_REF_WIN).mean().iloc[-2])
-    # 2) ATR-adaptif multiplier (taban +%5)
+    if not np.isfinite(dvol_ref) or dvol_ref <= 0:
+        dvol_ref = float((df['close']*df['volume']).iloc[-(VOL_REF_WIN+1):-1].mean())
+        if not np.isfinite(dvol_ref) or dvol_ref <= 0:
+            dvol_ref = dvol_usd  # en azından “mevcut”a yaslan
+
     mult = 1.0 + clamp(atr_ratio * VOL_ATR_K, 0.0, VOL_ATR_CAP) if np.isfinite(atr_ratio) else 1.0
     mult = max(mult, VOL_MIN_BASE)
+
     if VOLUME_GATE_MODE == "full":
-        vol_z = float(last.get('vol_z', np.nan))
-        body, up, low = candle_body_wicks(last)
-        bbp = _bb_prox(last, side=side)
-        good_spike = np.isfinite(vol_z) and (vol_z >= VOL_Z_GOOD)
-        trap_like = ((up >= TRAP_WICK_MIN and side == "long") or
-                     (low >= TRAP_WICK_MIN and side == "short") or
-                     (bbp >= TRAP_BB_NEAR))
-        if good_spike:
-            if side == "long" and (body >= GOOD_BODY_MIN) and (up <= GOOD_UPWICK_MAX):
-                mult = min(mult, VOL_RELAX)
-            elif side == "short" and (body >= GOOD_BODY_MIN) and (low <= GOOD_DNWICK_MAX):
-                mult = min(mult, VOL_RELAX)
-            elif trap_like:
-                mult *= VOL_TIGHT
         if VOL_OBV_TIGHT > 1.0:
             obv_m = _obv_slope_recent(df, win=OBV_SLOPE_WIN)
             if (side == "long" and obv_m <= 0) or (side == "short" and obv_m >= 0):
                 mult *= VOL_OBV_TIGHT
+
     need = dvol_ref * (mult * relax)
-    ok = (dvol_usd > need)
-    return (ok, f"dvol={dvol_usd:.0f} need>{need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f})")
+
+    # küçük buffer: majors %10, diğerleri %5
+    buffer = 0.90 if is_major else 0.95
+    ok = dvol_usd > (need * buffer)
+
+    if not ok:
+        return False, f"SOFT_GATE dvol={dvol_usd:.0f} ≤ need>{need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f}, buf={buffer:.2f})"
+
+    return True, f"OK dvol={dvol_usd:.0f} > need>{need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f})"
 # === SMI shade classifier (light/dark) ===
 def smi_shade(smi_val: float, atr_val: float, norm_cap: float, split: float = 0.50) -> str:
     """
@@ -823,16 +846,16 @@ def divergence_strength_ok(df, side: str,
         ema10_conf = (close > ema10) if side == "long" else (close < ema10)
     # 1) ADX >= 15 → güçlü: direkt geç
     if adx_last >= ADX_THRESHOLD:
-        return True and ema10_conf
+        return ema10_conf
     # 2) ADX 10–15: ADX rising (hybrid yeter), + katılım teyidi (vol_z ya da obv)
     if DIVERGENCE_ADX_MIN <= adx_last < ADX_THRESHOLD:
         if adx_rise and (vol_z >= vol_z_min or obv_ok):
-            return True and ema10_conf
+            return ema10_conf
         return False
     # 3) ADX < 10: NTX hızlı yükseliş + katılım şart
     if adx_last < DIVERGENCE_ADX_MIN:
         if ntx_rise_fast and (vol_z >= vol_z_min or obv_ok):
-            return True and ema10_conf
+            return ema10_conf
         return False
 def _find_pivots(series: pd.Series, left: int, right: int, kind: str) -> list[tuple[pd.Timestamp, float]]:
     s = series.astype(float)
@@ -973,11 +996,18 @@ async def check_signals(symbol, timeframe='4h'):
         trend_strong_long = dir_long_ok and rising_long
         trend_strong_short = dir_short_ok and rising_short
         # --- Hacim filtresi ---
-        relax = trend_relax_factor(df['adx'].iloc[-2], ntx_last, ntx_thr) # NTX ile hibrit
-        ok_l, reason_l = volume_gate(df, "long", avg_atr_ratio, symbol, relax=relax)
-        ok_s, reason_s = volume_gate(df, "short", avg_atr_ratio, symbol, relax=relax)
-        logger.info(f"{symbol} {timeframe} VOL_LONG {ok_l} | {reason_l}")
-        logger.info(f"{symbol} {timeframe} VOL_SHORT {ok_s} | {reason_s}")
+        relax = trend_relax_factor(df['adx'].iloc[-2], ntx_last, ntx_thr)
+        relax_div = relax * 0.90  # divergence girişlerinde %10 daha gevşek
+        ok_l_ema, reason_l_ema = volume_gate(df, "long", avg_atr_ratio, symbol, relax=relax)
+        ok_s_ema, reason_s_ema = volume_gate(df, "short", avg_atr_ratio, symbol, relax=relax)
+
+        ok_l_div, reason_l_div = volume_gate(df, "long", avg_atr_ratio, symbol, relax=relax_div)
+        ok_s_div, reason_s_div = volume_gate(df, "short", avg_atr_ratio, symbol, relax=relax_div)
+
+        logger.info(f"{symbol} {timeframe} VOL_LONG EMA {ok_l_ema} | {reason_l_ema}")
+        logger.info(f"{symbol} {timeframe} VOL_LONG DIV {ok_l_div} | {reason_l_div}")
+        logger.info(f"{symbol} {timeframe} VOL_SHORT EMA {ok_s_ema} | {reason_s_ema}")
+        logger.info(f"{symbol} {timeframe} VOL_SHORT DIV {ok_s_div} | {reason_s_div}")
         # ---- Trap skoru & sabit kapı ----
         bull_score = compute_trap_scores(df, side="long") if USE_TRAP_SCORING else {"score": 0.0, "label": _risk_label(0.0)}
         bear_score = compute_trap_scores(df, side="short") if USE_TRAP_SCORING else {"score": 0.0, "label": _risk_label(0.0)}
@@ -1029,8 +1059,8 @@ async def check_signals(symbol, timeframe='4h'):
         # Tetik (ADX moduna göre: Çok sıkı, Normal, Direkt)
         adx_last = df['adx'].iloc[-2]
         if adx_last < ADX_THRESHOLD: # <15: Çok sıkı mod
-            ema_setup_buy = stack_long and retest_long and ok_l and (bull_score["score"] <= TRAP_TIGHT_MAX) and slow_ok_long and smi_condition_long
-            ema_setup_sell = stack_short and retest_short and ok_s and (bear_score["score"] <= TRAP_TIGHT_MAX) and slow_ok_short and smi_condition_short
+            ema_setup_buy = stack_long and retest_long and ok_l_ema and (bull_score["score"] <= TRAP_TIGHT_MAX) and slow_ok_long and smi_condition_long
+            ema_setup_sell = stack_short and retest_short and ok_s_ema and (bear_score["score"] <= TRAP_TIGHT_MAX) and slow_ok_short and smi_condition_short
         elif ADX_THRESHOLD <= adx_last < ADX_NORMAL_HIGH: # 15-21: Normal mod (2of3)
             trig_long = fresh_up or retest_long if USE_STACK_FRESH else fresh_up
             trig_short = fresh_dn or retest_short if USE_STACK_FRESH else fresh_dn
@@ -1071,22 +1101,22 @@ async def check_signals(symbol, timeframe='4h'):
         )
         # 4.a) EMA tabanlı giriş (AYNEN KALIR)
         buy_condition_ema = (
-            ema_setup_buy and ok_l and smi_condition_long and
+            ema_setup_buy and ok_l_ema and smi_condition_long and
             str_ok and dir_long_ok and trap_ok_long and froth_ok_long and is_green and
             (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
         )
         sell_condition_ema = (
-            ema_setup_sell and ok_s and smi_condition_short and
+            ema_setup_sell and ok_s_ema and smi_condition_short and
             str_ok and dir_short_ok and trap_ok_short and froth_ok_short and is_red and
             (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
         )
         # 4.b) SMI Divergence tabanlı giriş (EMA ile ilgili hiçbir şart yok)
         buy_condition_div = (
-            USE_SMI_DIVERGENCE and div_bull and ok_l and
+            USE_SMI_DIVERGENCE and div_bull and ok_l_div and
             div_strength_long and trap_ok_long and froth_ok_long_div and is_green and shade_ok_long
         )
         sell_condition_div = (
-            USE_SMI_DIVERGENCE and div_bear and ok_s and
+            USE_SMI_DIVERGENCE and div_bear and ok_s_div and
             div_strength_short and trap_ok_short and froth_ok_short_div and is_red and shade_ok_short
         )
         # --- Position state init (must come BEFORE using current_pos / key) ---
@@ -1477,10 +1507,11 @@ async def check_signals(symbol, timeframe='4h'):
                 return
             signal_cache[key] = current_pos
         # Sayaçlar (telemetri, check_signals sonuna ekle)
-        blocked_by_froth = 0 if froth_ok_long else 1
-        blocked_by_trap = 0 if trap_ok_long else 1
-        passed_because_strong = 1 if trend_strong_long and not froth_ok_long else 0
-        logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} blocked_by_trap:{blocked_by_trap} passed_because_strong:{passed_because_strong}")
+        blocked_by_froth_L = 0 if froth_ok_long else 1
+        blocked_by_froth_S = 0 if froth_ok_short else 1
+        blocked_by_trap_L = 0 if trap_ok_long else 1
+        blocked_by_trap_S = 0 if trap_ok_short else 1
+        logger.info(f"{symbol} {timeframe} froth_block L:{blocked_by_froth_L} S:{blocked_by_froth_S} | trap_block L:{blocked_by_trap_L} S:{blocked_by_trap_S}")
     except Exception as e:
         logger.exception(f"Hata ({symbol} {timeframe}): {str(e)}")
         return
