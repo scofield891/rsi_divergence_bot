@@ -39,6 +39,10 @@ if not BOT_TOKEN or not CHAT_ID:
     TEST_MODE = True
 VERBOSE_LOG = False
 
+# ---- Sharding Parametreleri ----
+SHARDS = int(os.getenv("SHARDS", "1"))
+SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
+
 # ---- Sinyal / Risk Parametreleri ----
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8
@@ -69,7 +73,7 @@ REQUIRE_DIRECTION = False
 
 # ---- Rate-limit & tarama pacing ----
 MAX_CONCURRENT_FETCHES = 4
-BATCH_SIZE = 10
+BATCH_SIZE = 8  # 10 → 8, daha akıcı batch’ler için
 INTER_BATCH_SLEEP = 5.0
 
 # ---- Sembol keşfi ----
@@ -293,6 +297,7 @@ async def message_sender():
 # ================== Rate-limit Dostu Fetch ==================
 async def fetch_ohlcv_async(symbol, timeframe, limit):
     global _last_call_ts
+    HARD_TIMEOUT = 45  # saniye
     for attempt in range(4):
         try:
             async with _fetch_sem:
@@ -302,7 +307,15 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
                     if wait > 0:
                         await asyncio.sleep(wait)
                     _last_call_ts = asyncio.get_event_loop().time()
-                    return await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+                # CCXT çağrısını hard timeout ile to_thread sarmala
+                return await asyncio.wait_for(
+                    asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit),
+                    timeout=HARD_TIMEOUT
+                )
+        except asyncio.TimeoutError:
+            backoff = (2 ** attempt) * 1.5
+            logger.warning(f"Timeout (hard) {symbol} {timeframe}, backoff {backoff:.1f}s")
+            await asyncio.sleep(backoff)
         except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
             backoff = (2 ** attempt) * 1.5
             logger.warning(f"Rate limit {symbol} {timeframe}, backoff {backoff:.1f}s ({e.__class__.__name__})")
@@ -328,6 +341,9 @@ async def discover_bybit_symbols(linear_only=True, quote_whitelist=("USDT",)):
             continue
         syms.append(s)
     syms = sorted(set(syms))
+    if SHARDS > 1:
+        syms = [s for i, s in enumerate(syms) if (i % SHARDS) == SHARD_INDEX]
+        logger.info(f"Shard filtresi aktif: SHARDS={SHARDS} SHARD_INDEX={SHARD_INDEX} -> bu worker {len(syms)} sembol tarayacak.")
     logger.info(f"Keşfedilen sembol sayısı: {len(syms)} (linear={linear_only}, quotes={quote_whitelist})")
     return syms
 
@@ -1117,11 +1133,14 @@ async def main_loop():
     logger.info(f"Tarama başladı, sembol sayısı: {len(symbols)}")
     random.shuffle(symbols)
     batches = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
-    for batch in batches:
-        tasks = []
-        for symbol in batch:
-            tasks.append(check_signals(symbol, timeframe='4h'))
-        await asyncio.gather(*tasks)
+    for bi, batch in enumerate(batches, start=1):
+        tasks = [check_signals(symbol, timeframe='4h') for symbol in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Hata logla, ama devam et
+        for sym, res in zip(batch, results):
+            if isinstance(res, Exception):
+                logger.error(f"Task hata: {sym} -> {repr(res)}")
+        logger.info(f"Batch {bi}/{len(batches)} tamam: {len(batch)} sembol işlendi.")
         await asyncio.sleep(INTER_BATCH_SLEEP)
     logger.info("Tarama tamamlandı.")
 
@@ -1137,7 +1156,7 @@ async def main():
         asyncio.create_task(message_sender())
         while True:
             await main_loop()
-            await asyncio.sleep(60)
+            await asyncio.sleep clandestine
     except Exception as e:
         logger.error(f"Main loop hata: {str(e)}")
         if not TEST_MODE and telegram_bot:
