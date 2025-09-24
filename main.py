@@ -20,8 +20,8 @@ from typing import Tuple
 
 # ================== Logging ==================
 logger = logging.getLogger()
+logger.setLevel(logging.INFO)  # Koşulsuz INFO seviyesi
 if not logger.handlers:
-    logger.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
@@ -72,7 +72,7 @@ MAX_CONCURRENT_FETCHES = 4
 BATCH_SIZE = 10
 INTER_BATCH_SLEEP = 5.0
 
-# ---- Sembol keşif ----
+# ---- Sembol keşfi ----
 LINEAR_ONLY = True
 QUOTE_WHITELIST = ("USDT",)
 MARKETS_REFRESH_INTERVAL = 6 * 3600  # 6 saatte bir markets yenile
@@ -93,7 +93,7 @@ RSI_SHORT_EXCESS = 30.0
 TRAP_BASE_MAX = 39.0
 
 # ==== Hacim Filtresi ====
-VOLUME_GATE_MODE = "lite"  # "lite", "lite_tight" veya "full"
+VOLUME_GATE_MODE = "lite_tight"  # "lite" yerine "lite_tight" denemesi
 VOL_LIQ_USE = True
 VOL_LIQ_ROLL = 60
 VOL_LIQ_QUANTILE = 0.50
@@ -111,7 +111,7 @@ GOOD_BODY_MIN = 0.55
 GOOD_UPWICK_MAX = 0.22
 GOOD_DNWICK_MAX = 0.22
 OBV_SLOPE_WIN = 5
-VOL_OBV_TIGHT = 1.05
+VOL_OBV_TIGHT = 1.03  # 1.05 → 1.03, daha az sinyal kaçırmak için
 
 # ==== NTX (Noise-Tolerant Trend Index) ====
 NTX_PERIOD = 14
@@ -175,7 +175,9 @@ RATE_LIMIT_MS = max(200, getattr(exchange, 'rateLimit', 200))  # exchange sonras
 MARKETS = {}
 async def load_markets():
     global MARKETS
+    logger.info("Loading markets...")
     MARKETS = await asyncio.to_thread(exchange.load_markets)
+    logger.info(f"Markets loaded: {len(MARKETS)}")
 
 def configure_exchange_session(exchange, pool=50):
     s = requests.Session()
@@ -1106,6 +1108,7 @@ async def check_signals(symbol, timeframe='4h'):
 # ================== Ana Döngü ==================
 async def main_loop():
     global MARKETS
+    logger.info("Tarama başlıyor...")
     now = time.time()
     if not MARKETS or (now - getattr(main_loop, 'last_markets_refresh', 0) > MARKETS_REFRESH_INTERVAL):
         await load_markets()
@@ -1125,6 +1128,8 @@ async def main_loop():
 # ================== Başlangıç ==================
 _state_lock = asyncio.Lock()
 async def main():
+    logger.info(f"Process started. PID={os.getpid()} TZ={time.tzname}")
+    logger.info(f"TEST_MODE={TEST_MODE} RATE_LIMIT_MS={RATE_LIMIT_MS}")
     try:
         await load_markets()  # Bir kere yükle
         if not TEST_MODE and telegram_bot:
