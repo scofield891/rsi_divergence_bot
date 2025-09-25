@@ -40,8 +40,7 @@ if not BOT_TOKEN or not CHAT_ID:
 VERBOSE_LOG = False
 
 # ---- Sharding Parametreleri ----
-SHARDS = int(os.getenv("SHARDS", "1"))
-SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
+N_SHARDS = 5  # Sabit shard sayısı, environment'sız
 
 # ---- Sinyal / Risk Parametreleri ----
 LOOKBACK_ATR = 18
@@ -73,13 +72,14 @@ REQUIRE_DIRECTION = False
 
 # ---- Rate-limit & tarama pacing ----
 MAX_CONCURRENT_FETCHES = 4
-BATCH_SIZE = 8  # 10 → 8, daha akıcı batch’ler için
+BATCH_SIZE = 8
 INTER_BATCH_SLEEP = 5.0
+SCAN_INTERVAL_SEC = int(os.getenv("SCAN_INTERVAL_SEC", "60"))
 
 # ---- Sembol keşfi ----
 LINEAR_ONLY = True
 QUOTE_WHITELIST = ("USDT",)
-MARKETS_REFRESH_INTERVAL = 6 * 3600  # 6 saatte bir markets yenile
+MARKETS_REFRESH_INTERVAL = 6 * 3600
 
 # ================== TRAP SKORLAMA ==================
 USE_TRAP_SCORING = True
@@ -97,7 +97,7 @@ RSI_SHORT_EXCESS = 30.0
 TRAP_BASE_MAX = 39.0
 
 # ==== Hacim Filtresi ====
-VOLUME_GATE_MODE = "lite_tight"  # "lite" yerine "lite_tight" denemesi
+VOLUME_GATE_MODE = "lite_tight"
 VOL_LIQ_USE = True
 VOL_LIQ_ROLL = 60
 VOL_LIQ_QUANTILE = 0.50
@@ -115,7 +115,7 @@ GOOD_BODY_MIN = 0.55
 GOOD_UPWICK_MAX = 0.22
 GOOD_DNWICK_MAX = 0.22
 OBV_SLOPE_WIN = 5
-VOL_OBV_TIGHT = 1.03  # 1.05 → 1.03, daha az sinyal kaçırmak için
+VOL_OBV_TIGHT = 1.03
 
 # ==== NTX (Noise-Tolerant Trend Index) ====
 NTX_PERIOD = 14
@@ -174,7 +174,7 @@ exchange = ccxt.bybit({
     'options': {'defaultType': 'linear'},
     'timeout': 60000
 })
-RATE_LIMIT_MS = max(200, getattr(exchange, 'rateLimit', 200))  # exchange sonrası tanımlı
+RATE_LIMIT_MS = max(200, getattr(exchange, 'rateLimit', 200))
 
 MARKETS = {}
 async def load_markets():
@@ -211,7 +211,7 @@ _rate_lock = asyncio.Lock()
 _last_call_ts = 0.0
 STATE_FILE = 'positions.json'
 DT_KEYS = {"last_signal_time", "entry_time", "last_bar_time", "last_regime_bar"}
-LAST_FLUSH = {}  # State yazım sıklığını sınırlamak için
+LAST_FLUSH = {}
 
 def _json_default(o):
     if isinstance(o, datetime):
@@ -283,7 +283,7 @@ async def message_sender():
                 await asyncio.sleep(0)
             else:
                 await telegram_bot.send_message(chat_id=CHAT_ID, text=message)
-                await asyncio.sleep(0.3)  # Spam önleme için 0.3s
+                await asyncio.sleep(0.3)
         except (telegram.error.RetryAfter, telegram.error.TimedOut) as e:
             wait_time = getattr(e, 'retry_after', 5) + 2
             logger.warning(f"Telegram: RetryAfter, {wait_time-2}s bekle")
@@ -297,7 +297,7 @@ async def message_sender():
 # ================== Rate-limit Dostu Fetch ==================
 async def fetch_ohlcv_async(symbol, timeframe, limit):
     global _last_call_ts
-    HARD_TIMEOUT = 45  # saniye
+    HARD_TIMEOUT = 45
     for attempt in range(4):
         try:
             async with _fetch_sem:
@@ -307,7 +307,6 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
                     if wait > 0:
                         await asyncio.sleep(wait)
                     _last_call_ts = asyncio.get_event_loop().time()
-                # CCXT çağrısını hard timeout ile to_thread sarmala
                 return await asyncio.wait_for(
                     asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit),
                     timeout=HARD_TIMEOUT
@@ -328,7 +327,7 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
 
 # ================== Sembol Keşfi (Bybit) ==================
 async def discover_bybit_symbols(linear_only=True, quote_whitelist=("USDT",)):
-    markets = MARKETS  # Cache’lenmiş markets kullan
+    markets = MARKETS
     syms = []
     for s, m in markets.items():
         if not m.get('active', True):
@@ -341,9 +340,6 @@ async def discover_bybit_symbols(linear_only=True, quote_whitelist=("USDT",)):
             continue
         syms.append(s)
     syms = sorted(set(syms))
-    if SHARDS > 1:
-        syms = [s for i, s in enumerate(syms) if (i % SHARDS) == SHARD_INDEX]
-        logger.info(f"Shard filtresi aktif: SHARDS={SHARDS} SHARD_INDEX={SHARD_INDEX} -> bu worker {len(syms)} sembol tarayacak.")
     logger.info(f"Keşfedilen sembol sayısı: {len(syms)} (linear={linear_only}, quotes={quote_whitelist})")
     return syms
 
@@ -903,7 +899,6 @@ async def check_signals(symbol, timeframe='4h'):
         trap_ok_long = (bull_score["score"] <= eff_trap_max)
         trap_ok_short = (bear_score["score"] <= eff_trap_max)
         logger.info(f"{symbol} {timeframe} trap_thr:{eff_trap_max:.2f}")
-        # ---- Froth guard (flag'e bağlı) ----
         base_K = FROTH_GUARD_K_ATR
         K_long = min(base_K * 1.2, 1.3) if trend_strong_long else base_K
         K_short = min(base_K * 1.2, 1.3) if trend_strong_short else base_K
@@ -1125,6 +1120,8 @@ async def check_signals(symbol, timeframe='4h'):
 async def main_loop():
     global MARKETS
     logger.info("Tarama başlıyor...")
+    loop_start = time.time()
+    total_scanned = 0
     now = time.time()
     if not MARKETS or (now - getattr(main_loop, 'last_markets_refresh', 0) > MARKETS_REFRESH_INTERVAL):
         await load_markets()
@@ -1132,17 +1129,22 @@ async def main_loop():
     symbols = await discover_bybit_symbols(linear_only=LINEAR_ONLY, quote_whitelist=QUOTE_WHITELIST)
     logger.info(f"Tarama başladı, sembol sayısı: {len(symbols)}")
     random.shuffle(symbols)
-    batches = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
-    for bi, batch in enumerate(batches, start=1):
-        tasks = [check_signals(symbol, timeframe='4h') for symbol in batch]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        # Hata logla, ama devam et
-        for sym, res in zip(batch, results):
-            if isinstance(res, Exception):
-                logger.error(f"Task hata: {sym} -> {repr(res)}")
-        logger.info(f"Batch {bi}/{len(batches)} tamam: {len(batch)} sembol işlendi.")
-        await asyncio.sleep(INTER_BATCH_SLEEP)
-    logger.info("Tarama tamamlandı.")
+    for shard_index in range(N_SHARDS):
+        shard_symbols = [s for i, s in enumerate(symbols) if (i % N_SHARDS) == shard_index]
+        total_scanned += len(shard_symbols)
+        logger.info(f"Shard {shard_index+1}/{N_SHARDS} -> {len(shard_symbols)} sembol taranacak")
+        batches = [shard_symbols[i:i + BATCH_SIZE] for i in range(0, len(shard_symbols), BATCH_SIZE)]
+        for bi, batch in enumerate(batches, start=1):
+            tasks = [check_signals(symbol, timeframe='4h') for symbol in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for sym, res in zip(batch, results):
+                if isinstance(res, Exception):
+                    logger.error(f"Task hata: {sym} -> {repr(res)}")
+            logger.info(f"Batch {bi}/{len(batches)} tamam: {len(batch)} sembol işlendi.")
+            await asyncio.sleep(INTER_BATCH_SLEEP + random.random() * 0.5)
+    elapsed = time.time() - loop_start
+    sleep_sec = max(0.0, SCAN_INTERVAL_SEC - elapsed)
+    logger.info(f"Tur bitti, {total_scanned} sembol tarandı, {elapsed:.1f}s sürdü, {sleep_sec:.1f}s bekle...")
 
 # ================== Başlangıç ==================
 _state_lock = asyncio.Lock()
@@ -1150,18 +1152,18 @@ async def main():
     logger.info(f"Process started. PID={os.getpid()} TZ={time.tzname}")
     logger.info(f"TEST_MODE={TEST_MODE} RATE_LIMIT_MS={RATE_LIMIT_MS}")
     try:
-        await load_markets()  # Bir kere yükle
+        await load_markets()
         if not TEST_MODE and telegram_bot:
             await telegram_bot.send_message(chat_id=CHAT_ID, text="🟢 Bot başlatıldı.")
         asyncio.create_task(message_sender())
         while True:
             await main_loop()
-            await asyncio.sleep clandestine
+            await asyncio.sleep(SCAN_INTERVAL_SEC)
     except Exception as e:
         logger.error(f"Main loop hata: {str(e)}")
         if not TEST_MODE and telegram_bot:
             await telegram_bot.send_message(chat_id=CHAT_ID, text=f"🔴 Bot hata: {str(e)}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(SCAN_INTERVAL_SEC)
 
 if __name__ == "__main__":
     asyncio.run(main())
