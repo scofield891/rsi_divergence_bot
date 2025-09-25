@@ -38,10 +38,8 @@ if not BOT_TOKEN or not CHAT_ID:
     logger.warning("ENV yok → TEST_MODE=True (Telegram kapalı).")
     TEST_MODE = True
 VERBOSE_LOG = False
-
-# ---- Sharding Parametreleri ----
-N_SHARDS = 5  # Sabit shard sayısı, environment'sız
-
+SHARDS = int(os.getenv("SHARDS", "1"))
+SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
 # ---- Sinyal / Risk Parametreleri ----
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8
@@ -54,7 +52,6 @@ LOOKBACK_SMI = 20
 ADX_PERIOD = 14
 ADX_THRESHOLD = 15
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
-
 # ==== SMI Light (Adaptif + Slope teyidi + opsiyonel froth guard) ====
 SMI_LIGHT_NORM_MAX = 0.75
 SMI_LIGHT_ADAPTIVE = True
@@ -65,22 +62,22 @@ SMI_LIGHT_REQUIRE_SQUEEZE = False
 USE_SMI_SLOPE_CONFIRM = True
 USE_FROTH_GUARD = True
 FROTH_GUARD_K_ATR = 1.4
-
 # === ADX sinyal modu ===
 SIGNAL_MODE = "2of3"
 REQUIRE_DIRECTION = False
-
 # ---- Rate-limit & tarama pacing ----
 MAX_CONCURRENT_FETCHES = 4
 BATCH_SIZE = 8
 INTER_BATCH_SLEEP = 5.0
 SCAN_INTERVAL_SEC = int(os.getenv("SCAN_INTERVAL_SEC", "60"))
-
 # ---- Sembol keşfi ----
 LINEAR_ONLY = True
 QUOTE_WHITELIST = ("USDT",)
 MARKETS_REFRESH_INTERVAL = 6 * 3600
-
+# Retest sonrası onay ve 10/30 onay pencereleri
+RETEST_CONFIRM_BARS = 5      # retest'ten sonra en fazla kaç kapalı mumda onay aranır
+LATE_WAIT_BARS = 15          # rejim flip'ten sonra retest yoksa kaç kapalı mum beklenir
+CROSS_1030_CONFIRM_BARS = 5  # 10/30 kesişiminden sonra onay aranacak pencere
 # ================== TRAP SKORLAMA ==================
 USE_TRAP_SCORING = True
 SCORING_CTX_BARS = 3
@@ -95,7 +92,6 @@ W_FB = 10.0
 RSI_LONG_EXCESS = 70.0
 RSI_SHORT_EXCESS = 30.0
 TRAP_BASE_MAX = 39.0
-
 # ==== Hacim Filtresi ====
 VOLUME_GATE_MODE = "lite_tight"
 VOL_LIQ_USE = True
@@ -116,7 +112,6 @@ GOOD_UPWICK_MAX = 0.22
 GOOD_DNWICK_MAX = 0.22
 OBV_SLOPE_WIN = 5
 VOL_OBV_TIGHT = 1.03
-
 # ==== NTX (Noise-Tolerant Trend Index) ====
 NTX_PERIOD = 14
 NTX_K_EFF = 10
@@ -130,16 +125,13 @@ NTX_RISE_EPS = 0.05
 NTX_RISE_K_HYBRID = 3
 NTX_FROTH_K = 1.0
 NTX_HYBRID_TRAP_MARGIN = 3.0
-
 # ==== EMA 10/30/90 Parametreleri ====
 EMA_FAST = 10
 EMA_MID = 30
 EMA_SLOW = 90
 RETEST_K_ATR = 0.30
-
 # ==== EMA epoch/early ayarları ====
 EPOCH_EARLY_BARS = 15
-
 # ==== Debounce ayarları (ADX'e göre) ====
 APPLY_DEBOUNCE_EMA = True
 DEB_WEAK = 2
@@ -175,8 +167,8 @@ exchange = ccxt.bybit({
     'timeout': 60000
 })
 RATE_LIMIT_MS = max(200, getattr(exchange, 'rateLimit', 200))
-
 MARKETS = {}
+
 async def load_markets():
     global MARKETS
     logger.info("Loading markets...")
@@ -195,7 +187,6 @@ def configure_exchange_session(exchange, pool=50):
     exchange.session = s
 
 configure_exchange_session(exchange, pool=50)
-
 telegram_bot = None
 if not TEST_MODE:
     telegram_bot = telegram.Bot(
@@ -209,7 +200,7 @@ message_queue = asyncio.Queue(maxsize=1000)
 _fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
 _rate_lock = asyncio.Lock()
 _last_call_ts = 0.0
-STATE_FILE = 'positions.json'
+STATE_FILE = f'positions_{SHARD_INDEX}.json' if SHARDS > 1 else 'positions.json'
 DT_KEYS = {"last_signal_time", "entry_time", "last_bar_time", "last_regime_bar"}
 LAST_FLUSH = {}
 
@@ -804,6 +795,14 @@ def _retested_within(df, bars=EPOCH_EARLY_BARS, k=RETEST_K_ATR):
     ret_S = (dist <= k*sub['atr']).any()
     return bool(ret_L), bool(ret_S)
 
+def _bars_since_last(sig: pd.Series) -> int:
+    if bool(sig.any()):
+        arr = np.where(sig.values[:-1])[0]
+        if arr.size:
+            last_idx = int(arr[-1])
+            return (len(sig) - 2) - last_idx
+    return 10**6
+
 # ================== Sinyal Döngüsü ==================
 async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
@@ -918,13 +917,6 @@ async def check_signals(symbol, timeframe='4h'):
         e90 = df['ema90']
         cross_up_3090 = (e30.shift(1) <= e90.shift(1)) & (e30 > e90)
         cross_dn_3090 = (e30.shift(1) >= e90.shift(1)) & (e30 < e90)
-        def _bars_since_last(sig: pd.Series) -> int:
-            if bool(sig.any()):
-                arr = np.where(sig.values[:-1])[0]
-                if arr.size:
-                    last_idx = int(arr[-1])
-                    return (len(sig) - 2) - last_idx
-            return 10**6
         in_early_L = (_bars_since_last(cross_up_3090) <= EPOCH_EARLY_BARS)
         in_early_S = (_bars_since_last(cross_dn_3090) <= EPOCH_EARLY_BARS)
         retest_long, retest_short = _retested_within(df, bars=EPOCH_EARLY_BARS, k=RETEST_K_ATR)
@@ -933,44 +925,85 @@ async def check_signals(symbol, timeframe='4h'):
         smi_early_ok_S = (shade_curr == "light_red")
         cross_up_1030 = (e10.shift(1) <= e30.shift(1)) & (e10 > e30)
         cross_dn_1030 = (e10.shift(1) >= e30.shift(1)) & (e10 < e30)
-        cross_up_last = bool(cross_up_1030.iloc[-2]) if len(cross_up_1030) >= 2 else False
-        cross_dn_last = bool(cross_dn_1030.iloc[-2]) if len(cross_dn_1030) >= 2 else False
-        buy_early = (
-            in_early_L
-            and retest_long
-            and smi_early_ok_L
-            and trend_ok_long and dir_long_ok
-            and ok_l and trap_ok_long and froth_ok_long and is_green
-            and (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
+        # --- 10/30 kesişim onay penceresi (CROSS_1030_CONFIRM_BARS) ---
+        bars_since_1030_up = _bars_since_last(cross_up_1030)
+        bars_since_1030_dn = _bars_since_last(cross_dn_1030)
+        confirm_1030_L = (
+            (bars_since_1030_up <= CROSS_1030_CONFIRM_BARS)      # 10/30 up'tan sonra ≤5 mum
+            and (e10.iloc[-2] > e30.iloc[-2] > e90.iloc[-2])     # 10>30>90 hiyerarşisi kapalı mumda
+            and smi_early_ok_L                                    # SMI açık yeşil
+            and is_green                                          # mum yeşil
         )
-        buy_late = (
-            (not in_early_L)
-            and cross_up_last
-            and trend_ok_long and dir_long_ok
-            and smi_condition_long
-            and ok_l and trap_ok_long and froth_ok_long and is_green
-            and (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
+        confirm_1030_S = (
+            (bars_since_1030_dn <= CROSS_1030_CONFIRM_BARS)      # 10/30 down'dan sonra ≤5 mum
+            and (e10.iloc[-2] < e30.iloc[-2] < e90.iloc[-2])     # 10<30<90 hiyerarşisi kapalı mumda
+            and smi_early_ok_S                                    # SMI açık kırmızı
+            and is_red                                            # mum kırmızı
         )
-        sell_early = (
-            in_early_S
-            and retest_short
-            and smi_early_ok_S
-            and trend_ok_short and dir_short_ok
-            and ok_s and trap_ok_short and froth_ok_short and is_red
-            and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
-        )
-        sell_late = (
-            (not in_early_S)
-            and cross_dn_last
-            and trend_ok_short and dir_short_ok
-            and smi_condition_short
-            and ok_s and trap_ok_short and froth_ok_short and is_red
-            and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
-        )
+        # Rejim flip'ten beri retest oldu mu?
+        state_bars_flip = state.get('bars_since_regime_flip', 10**6)
+        retest_after_flip_L = (_bars_since_last(pd.Series([retest_long] * len(df), index=df.index)) <= state_bars_flip)  # flip'ten sonra long retest görülmüş
+        retest_after_flip_S = (_bars_since_last(pd.Series([retest_short] * len(df), index=df.index)) <= state_bars_flip)  # flip'ten sonra short retest görülmüş
+        # Geç (retestsiz) tetik için: rejim açık + flip'ten beri en az 15 mum + retest hiç olmadı
+        late_long_ok = (regime_long and state_bars_flip >= LATE_WAIT_BARS and not retest_after_flip_L)
+        late_short_ok = (regime_short and state_bars_flip >= LATE_WAIT_BARS and not retest_after_flip_S)
         regime_long = (e30.iloc[-2] > e90.iloc[-2])
         regime_short = (e30.iloc[-2] < e90.iloc[-2])
         regime_cross_up = regime_long and not (e30.iloc[-3] > e90.iloc[-3]) if len(e30) >= 3 else False
         regime_cross_dn = regime_short and not (e30.iloc[-3] < e90.iloc[-3]) if len(e30) >= 3 else False
+        retest_confirm_ok_L = (
+            in_early_L
+            and retest_long
+            and smi_early_ok_L
+            and is_green
+        )
+        retest_confirm_ok_S = (
+            in_early_S
+            and retest_short
+            and smi_early_ok_S
+            and is_red
+        )
+        # --- Erken (Retest + ≤5 mumda SMI açık yeşil/kırmızı + mum rengi) ---
+        buy_early = (
+            retest_confirm_ok_L
+            and trend_ok_long and dir_long_ok
+            and ok_l and trap_ok_long and froth_ok_long
+            and (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
+        )
+        sell_early = (
+            retest_confirm_ok_S
+            and trend_ok_short and dir_short_ok
+            and ok_s and trap_ok_short and froth_ok_short
+            and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
+        )
+        # --- 10/30 onay penceresi (≤5 mum) ---
+        buy_1030 = (
+            confirm_1030_L
+            and trend_ok_long and dir_long_ok
+            and ok_l and trap_ok_long and froth_ok_long
+            and (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
+        )
+        sell_1030 = (
+            confirm_1030_S
+            and trend_ok_short and dir_short_ok
+            and ok_s and trap_ok_short and froth_ok_short
+            and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
+        )
+        # --- Geç (retestsiz 15 mum) ---
+        buy_late = (
+            (not in_early_L) and late_long_ok
+            and smi_early_ok_L and is_green
+            and trend_ok_long and dir_long_ok
+            and ok_l and trap_ok_long and froth_ok_long
+            and (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
+        )
+        sell_late = (
+            (not in_early_S) and late_short_ok
+            and smi_early_ok_S and is_red
+            and trend_ok_short and dir_short_ok
+            and ok_s and trap_ok_short and froth_ok_short
+            and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
+        )
         async with _state_lock:
             state = signal_cache.get(symbol, {})
             bars_since_flip = state.get('bars_since_regime_flip', 10**6)
@@ -997,8 +1030,8 @@ async def check_signals(symbol, timeframe='4h'):
             )
             debounce_ok_long = (bars_since_flip >= wait_long)
             debounce_ok_short = (bars_since_flip >= wait_short)
-            buy_condition_ema = buy_early or buy_late
-            sell_condition_ema = sell_early or sell_late
+            buy_condition_ema = buy_early or buy_1030 or buy_late
+            sell_condition_ema = sell_early or sell_1030 or sell_late
             buy_condition = (debounce_ok_long and buy_condition_ema) if APPLY_DEBOUNCE_EMA else buy_condition_ema
             sell_condition = (debounce_ok_short and sell_condition_ema) if APPLY_DEBOUNCE_EMA else sell_condition_ema
             eff_trap_max_early = eff_trap_max - EARLY_TRAP_MARGIN if (EARLY_EXTRA_FILTER and bars_since_flip <= max(DEB_WEAK, DEB_MED)) else eff_trap_max
@@ -1007,7 +1040,7 @@ async def check_signals(symbol, timeframe='4h'):
             if EARLY_EXTRA_FILTER and bars_since_flip <= max(DEB_WEAK, DEB_MED):
                 buy_condition = buy_condition and trap_ok_long_early
                 sell_condition = sell_condition and trap_ok_short_early
-            logger.info(f"{symbol} {timeframe} triggers: earlyL={buy_early} lateL={buy_late} | earlyS={sell_early} lateS={sell_late}")
+            logger.info(f"{symbol} {timeframe} triggers: earlyL={buy_early} 1030L={buy_1030} lateL={buy_late} | earlyS={sell_early} 1030S={sell_1030} lateS={sell_late}")
             logger.info(f"{symbol} {timeframe} EMA: buy={buy_condition_ema} sell={sell_condition_ema}")
             logger.info(f"{symbol} {timeframe} debounce wait L:{wait_long} S:{wait_short} bars_since_flip:{bars_since_flip}")
             current_pos = state.get('position', None)
@@ -1041,7 +1074,6 @@ async def check_signals(symbol, timeframe='4h'):
                 tp1 = float(df['close'].iloc[-2]) + TP_MULTIPLIER1 * atr_value
                 tp2 = float(df['close'].iloc[-2]) + TP_MULTIPLIER2 * atr_value
                 sl = float(df['close'].iloc[-2]) - (SL_MULTIPLIER + SL_BUFFER) * atr_value
-                reason = "EMA"
                 msg = (
                     f"📈 {symbol} {timeframe} AL sinyali\n"
                     f"💰 Fiyat: {price_str} USDT\n"
@@ -1049,9 +1081,7 @@ async def check_signals(symbol, timeframe='4h'):
                     f"🎯 TP2: {fmt_sym(symbol, tp2)} ({TP_MULTIPLIER2}x ATR)\n"
                     f"🛑 SL: {fmt_sym(symbol, sl)} ({SL_MULTIPLIER+SL_BUFFER:.1f}x ATR)\n"
                     f"⚖️ Risk: {bull_score['label']}\n"
-                    f"📊 ADX: {adx_last:.1f} | NTX: {ntx_last:.1f}/{ntx_thr:.1f}\n"
-                    f"🕒 {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"🛠️ Sebep: {reason}"
+                    f"🕒 {now.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 state['position'] = 'long'
                 state['entry_price'] = float(df['close'].iloc[-2])
@@ -1061,7 +1091,6 @@ async def check_signals(symbol, timeframe='4h'):
                 state['entry_time'] = now
                 state['last_signal_time'] = now
                 state['last_bar_time'] = df.index[-2]
-                state['reason'] = reason
                 state_changed = True
                 signal_cache[symbol] = state
                 await enqueue_message(msg)
@@ -1079,17 +1108,14 @@ async def check_signals(symbol, timeframe='4h'):
                 tp1 = float(df['close'].iloc[-2]) - TP_MULTIPLIER1 * atr_value
                 tp2 = float(df['close'].iloc[-2]) - TP_MULTIPLIER2 * atr_value
                 sl = float(df['close'].iloc[-2]) + (SL_MULTIPLIER + SL_BUFFER) * atr_value
-                reason = "EMA"
                 msg = (
-                    f"📉 {symbol} {timeframe} SAT sinyali\n"
+                    f"📉 {symbol} {timeframe} SHORT sinyali\n"
                     f"💰 Fiyat: {price_str} USDT\n"
                     f"🎯 TP1: {fmt_sym(symbol, tp1)} ({TP_MULTIPLIER1}x ATR)\n"
                     f"🎯 TP2: {fmt_sym(symbol, tp2)} ({TP_MULTIPLIER2}x ATR)\n"
                     f"🛑 SL: {fmt_sym(symbol, sl)} ({SL_MULTIPLIER+SL_BUFFER:.1f}x ATR)\n"
                     f"⚖️ Risk: {bear_score['label']}\n"
-                    f"📊 ADX: {adx_last:.1f} | NTX: {ntx_last:.1f}/{ntx_thr:.1f}\n"
-                    f"🕒 {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"🛠️ Sebep: {reason}"
+                    f"🕒 {now.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 state['position'] = 'short'
                 state['entry_price'] = float(df['close'].iloc[-2])
@@ -1099,7 +1125,6 @@ async def check_signals(symbol, timeframe='4h'):
                 state['entry_time'] = now
                 state['last_signal_time'] = now
                 state['last_bar_time'] = df.index[-2]
-                state['reason'] = reason
                 state_changed = True
                 signal_cache[symbol] = state
                 await enqueue_message(msg)
@@ -1127,29 +1152,32 @@ async def main_loop():
         await load_markets()
         main_loop.last_markets_refresh = now
     symbols = await discover_bybit_symbols(linear_only=LINEAR_ONLY, quote_whitelist=QUOTE_WHITELIST)
+    # Env sharding: her instance kendi dilimini tarasın
+    if SHARDS > 1:
+        before = len(symbols)
+        symbols = [s for i, s in enumerate(symbols) if (i % SHARDS) == SHARD_INDEX]
+        logger.info(f"Env sharding aktif: SHARDS={SHARDS} SHARD_INDEX={SHARD_INDEX} | {before} -> {len(symbols)} sembol")
     logger.info(f"Tarama başladı, sembol sayısı: {len(symbols)}")
     random.shuffle(symbols)
-    for shard_index in range(N_SHARDS):
-        shard_symbols = [s for i, s in enumerate(symbols) if (i % N_SHARDS) == shard_index]
-        total_scanned += len(shard_symbols)
-        logger.info(f"Shard {shard_index+1}/{N_SHARDS} -> {len(shard_symbols)} sembol taranacak")
-        batches = [shard_symbols[i:i + BATCH_SIZE] for i in range(0, len(shard_symbols), BATCH_SIZE)]
-        for bi, batch in enumerate(batches, start=1):
-            tasks = [check_signals(symbol, timeframe='4h') for symbol in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for sym, res in zip(batch, results):
-                if isinstance(res, Exception):
-                    logger.error(f"Task hata: {sym} -> {repr(res)}")
-            logger.info(f"Batch {bi}/{len(batches)} tamam: {len(batch)} sembol işlendi.")
-            await asyncio.sleep(INTER_BATCH_SLEEP + random.random() * 0.5)
+    total_scanned = len(symbols)
+    batches = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
+    for bi, batch in enumerate(batches, start=1):
+        tasks = [check_signals(symbol, timeframe='4h') for symbol in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for sym, res in zip(batch, results):
+            if isinstance(res, Exception):
+                logger.error(f"Task hata: {sym} -> {repr(res)}")
+        logger.info(f"Batch {bi}/{len(batches)} tamam: {len(batch)} sembol işlendi.")
+        await asyncio.sleep(INTER_BATCH_SLEEP + random.random() * 0.5)
     elapsed = time.time() - loop_start
     sleep_sec = max(0.0, SCAN_INTERVAL_SEC - elapsed)
     logger.info(f"Tur bitti, {total_scanned} sembol tarandı, {elapsed:.1f}s sürdü, {sleep_sec:.1f}s bekle...")
 
 # ================== Başlangıç ==================
 _state_lock = asyncio.Lock()
+
 async def main():
-    logger.info(f"Process started. PID={os.getpid()} TZ={time.tzname}")
+    logger.info(f"Process started. PID={os.getpid()} TZ={time.tzname} SHARDS={SHARDS} SHARD_INDEX={SHARD_INDEX}")
     logger.info(f"TEST_MODE={TEST_MODE} RATE_LIMIT_MS={RATE_LIMIT_MS}")
     try:
         await load_markets()
