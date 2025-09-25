@@ -291,7 +291,11 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
                     timeout=HARD_TIMEOUT
                 )
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).tz_convert('Europe/Istanbul').tz_localize(None)
+                df['timestamp'] = (
+                    pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                      .dt.tz_convert('Europe/Istanbul')
+                      .dt.tz_localize(None)
+                )
                 return df
         except asyncio.TimeoutError:
             backoff = (2 ** attempt) * 1.5
@@ -385,7 +389,7 @@ def calculate_bb(df, period=20, mult=2.0):
     return df
 
 def calculate_kc(df, period=20, atr_period=20, mult=1.5):
-    df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period))
+    df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period), index=df.index)
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -470,6 +474,8 @@ def calculate_indicators(df, symbol, timeframe):
         logger.warning(f"DF çok kısa ({len(df)}), indikatör hesaplanamadı.")
         return None, None, None, None, None, None
     if 'timestamp' in df.columns:
+        if not np.issubdtype(df['timestamp'].dtype, np.datetime64):
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
         df.set_index('timestamp', inplace=True)
     closes = df['close'].values.astype(np.float64)
     df['ema10'] = calculate_ema(closes, EMA_FAST)
@@ -779,7 +785,7 @@ def _last_retest_bars(df: pd.DataFrame, side: str = "long", window: int = EPOCH_
     Son retest'in kapalı muma (iloc[-2]) göre kaç bar önce olduğunu döndürür.
     Yoksa 10**6 döner. window sadece bakılan aralığı sınırlar.
     """
-    sub = df.iloc[-(window+1):-1]  # son 'window' bar, kapalı muma kadar
+    sub = df.iloc[-(window+1):-1] # son 'window' bar, kapalı muma kadar
     if side == "long":
         touch = (sub['ema30'] - sub['low']).abs() <= (k * sub['atr'])
     else:
@@ -787,8 +793,8 @@ def _last_retest_bars(df: pd.DataFrame, side: str = "long", window: int = EPOCH_
     idx = np.where(touch.values)[0]
     if idx.size == 0:
         return 10**6
-    last_idx = int(idx[-1])            # sub içindeki son temas
-    return (len(sub) - 1) - last_idx   # kapalı muma göre bar mesafesi
+    last_idx = int(idx[-1]) # sub içindeki son temas
+    return (len(sub) - 1) - last_idx # kapalı muma göre bar mesafesi
 
 def _bars_since_last(sig: pd.Series) -> int:
     if bool(sig.any()):
@@ -803,7 +809,7 @@ async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
     try:
         if TEST_MODE:
-            np.random.seed(42)  # Reprodüksiyon için seed
+            np.random.seed(42) # Reprodüksiyon için seed
             N = 200
             ts0 = int(time.time()*1000) - N*4*60*60*1000
             closes = np.abs(np.cumsum(np.random.randn(N))) * 0.05 + 0.3
@@ -812,6 +818,11 @@ async def check_signals(symbol, timeframe='4h'):
             volumes = np.random.rand(N) * 10000
             ohlcv = [[ts0 + i*4*60*60*1000, closes[i], highs[i], lows[i], closes[i], volumes[i]] for i in range(N)]
             df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+            df['timestamp'] = (
+                pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                  .dt.tz_convert('Europe/Istanbul')
+                  .dt.tz_localize(None)
+            )
             logger.info(f"Test modu: {symbol} {timeframe}")
         else:
             limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40, SCORING_WIN + 5)
@@ -1167,7 +1178,7 @@ async def main():
             await telegram_bot.send_message(chat_id=CHAT_ID, text="🟢 Bot başlatıldı.")
         asyncio.create_task(message_sender())
         while True:
-            await main_loop()  # main_loop tarayıp dinamik bekliyor
+            await main_loop() # main_loop tarayıp dinamik bekliyor
     except Exception as e:
         logger.error(f"Main loop hata: {str(e)}")
         if not TEST_MODE and telegram_bot:
