@@ -20,7 +20,7 @@ from typing import Tuple
 
 # ================== Logging ==================
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)  # Koşulsuz INFO seviyesi
+logger.setLevel(logging.INFO)
 if not logger.handlers:
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     console_handler = logging.StreamHandler(sys.stdout)
@@ -40,7 +40,6 @@ if not BOT_TOKEN or not CHAT_ID:
 VERBOSE_LOG = False
 SHARDS = int(os.getenv("SHARDS", "1"))
 SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
-# ---- Sinyal / Risk Parametreleri ----
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8
 TP_MULTIPLIER1 = 2.0
@@ -52,7 +51,6 @@ LOOKBACK_SMI = 20
 ADX_PERIOD = 14
 ADX_THRESHOLD = 15
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
-# ==== SMI Light (Adaptif + Slope teyidi + opsiyonel froth guard) ====
 SMI_LIGHT_NORM_MAX = 0.75
 SMI_LIGHT_ADAPTIVE = True
 SMI_LIGHT_PCTL = 0.65
@@ -62,23 +60,18 @@ SMI_LIGHT_REQUIRE_SQUEEZE = False
 USE_SMI_SLOPE_CONFIRM = True
 USE_FROTH_GUARD = True
 FROTH_GUARD_K_ATR = 1.4
-# === ADX sinyal modu ===
 SIGNAL_MODE = "2of3"
 REQUIRE_DIRECTION = False
-# ---- Rate-limit & tarama pacing ----
 MAX_CONCURRENT_FETCHES = 4
 BATCH_SIZE = 8
 INTER_BATCH_SLEEP = 5.0
 SCAN_INTERVAL_SEC = int(os.getenv("SCAN_INTERVAL_SEC", "60"))
-# ---- Sembol keşfi ----
 LINEAR_ONLY = True
 QUOTE_WHITELIST = ("USDT",)
 MARKETS_REFRESH_INTERVAL = 6 * 3600
-# Retest sonrası onay ve 10/30 onay pencereleri
-RETEST_CONFIRM_BARS = 5      # retest'ten sonra en fazla kaç kapalı mumda onay aranır
-LATE_WAIT_BARS = 15          # rejim flip'ten sonra retest yoksa kaç kapalı mum beklenir
-CROSS_1030_CONFIRM_BARS = 5  # 10/30 kesişiminden sonra onay aranacak pencere
-# ================== TRAP SKORLAMA ==================
+RETEST_CONFIRM_BARS = 5
+LATE_WAIT_BARS = 15
+CROSS_1030_CONFIRM_BARS = 5
 USE_TRAP_SCORING = True
 SCORING_CTX_BARS = 3
 SCORING_WIN = 120
@@ -92,7 +85,6 @@ W_FB = 10.0
 RSI_LONG_EXCESS = 70.0
 RSI_SHORT_EXCESS = 30.0
 TRAP_BASE_MAX = 39.0
-# ==== Hacim Filtresi ====
 VOLUME_GATE_MODE = "lite_tight"
 VOL_LIQ_USE = True
 VOL_LIQ_ROLL = 60
@@ -112,7 +104,6 @@ GOOD_UPWICK_MAX = 0.22
 GOOD_DNWICK_MAX = 0.22
 OBV_SLOPE_WIN = 5
 VOL_OBV_TIGHT = 1.03
-# ==== NTX (Noise-Tolerant Trend Index) ====
 NTX_PERIOD = 14
 NTX_K_EFF = 10
 NTX_THR_LO, NTX_THR_HI = 52.0, 60.0
@@ -125,14 +116,11 @@ NTX_RISE_EPS = 0.05
 NTX_RISE_K_HYBRID = 3
 NTX_FROTH_K = 1.0
 NTX_HYBRID_TRAP_MARGIN = 3.0
-# ==== EMA 10/30/90 Parametreleri ====
 EMA_FAST = 10
 EMA_MID = 30
 EMA_SLOW = 90
 RETEST_K_ATR = 0.30
-# ==== EMA epoch/early ayarları ====
 EPOCH_EARLY_BARS = 15
-# ==== Debounce ayarları (ADX'e göre) ====
 APPLY_DEBOUNCE_EMA = True
 DEB_WEAK = 2
 DEB_MED = 1
@@ -145,7 +133,6 @@ REQUIRE_NTX_FOR_HARD = True
 EARLY_EXTRA_FILTER = True
 EARLY_TRAP_MARGIN = 3.0
 
-# TT mesaj etiketleri
 def _risk_label(score: float) -> str:
     if score < 20:
         return "Çok düşük risk 🟢"
@@ -187,6 +174,7 @@ def configure_exchange_session(exchange, pool=50):
     exchange.session = s
 
 configure_exchange_session(exchange, pool=50)
+
 telegram_bot = None
 if not TEST_MODE:
     telegram_bot = telegram.Bot(
@@ -741,7 +729,7 @@ def volume_gate(df: pd.DataFrame, side: str, atr_ratio: float, symbol: str = "",
         roll = dv.rolling(VOL_LIQ_ROLL, min_periods=VOL_LIQ_ROLL)
         q = roll.apply(lambda x: np.nanquantile(x, VOL_LIQ_QUANTILE), raw=True)
         qv = float(q.iloc[-2]) if pd.notna(q.iloc[-2]) else 0.0
-        dyn_min = _dynamic_liq_floor(dv)
+        dyn_min = _ Channels: dynamic_liq_floor(dv)
         if is_major:
             dyn_min = max(dyn_min, VOL_LIQ_MIN_DVOL_USD)
         hard_min = max(qv, dyn_min)
@@ -794,6 +782,22 @@ def _retested_within(df, bars=EPOCH_EARLY_BARS, k=RETEST_K_ATR):
     dist = (sub['ema30'] - sub['high']).abs()
     ret_S = (dist <= k*sub['atr']).any()
     return bool(ret_L), bool(ret_S)
+
+def _last_retest_bars(df: pd.DataFrame, side: str = "long", window: int = EPOCH_EARLY_BARS, k: float = RETEST_K_ATR) -> int:
+    """
+    Son retest'in kapalı muma (iloc[-2]) göre kaç bar önce olduğunu döndürür.
+    Yoksa 10**6 döner. window sadece bakılan aralığı sınırlar.
+    """
+    sub = df.iloc[-(window+1):-1]  # son 'window' bar, kapalı muma kadar
+    if side == "long":
+        touch = (sub['ema30'] - sub['low']).abs() <= (k * sub['atr'])
+    else:
+        touch = (sub['ema30'] - sub['high']).abs() <= (k * sub['atr'])
+    idx = np.where(touch.values)[0]
+    if idx.size == 0:
+        return 10**6
+    last_idx = int(idx[-1])            # sub içindeki son temas
+    return (len(sub) - 1) - last_idx   # kapalı muma göre bar mesafesi
 
 def _bars_since_last(sig: pd.Series) -> int:
     if bool(sig.any()):
@@ -919,51 +923,31 @@ async def check_signals(symbol, timeframe='4h'):
         cross_dn_3090 = (e30.shift(1) >= e90.shift(1)) & (e30 < e90)
         in_early_L = (_bars_since_last(cross_up_3090) <= EPOCH_EARLY_BARS)
         in_early_S = (_bars_since_last(cross_dn_3090) <= EPOCH_EARLY_BARS)
-        retest_long, retest_short = _retested_within(df, bars=EPOCH_EARLY_BARS, k=RETEST_K_ATR)
         shade_curr = smi_shade(float(df['smi'].iloc[-2]), atr_value, SMI_LIGHT_NORM_MAX_EFF)
         smi_early_ok_L = (shade_curr == "light_green")
         smi_early_ok_S = (shade_curr == "light_red")
         cross_up_1030 = (e10.shift(1) <= e30.shift(1)) & (e10 > e30)
         cross_dn_1030 = (e10.shift(1) >= e30.shift(1)) & (e10 < e30)
-        # --- 10/30 kesişim onay penceresi (CROSS_1030_CONFIRM_BARS) ---
         bars_since_1030_up = _bars_since_last(cross_up_1030)
         bars_since_1030_dn = _bars_since_last(cross_dn_1030)
         confirm_1030_L = (
-            (bars_since_1030_up <= CROSS_1030_CONFIRM_BARS)      # 10/30 up'tan sonra ≤5 mum
-            and (e10.iloc[-2] > e30.iloc[-2] > e90.iloc[-2])     # 10>30>90 hiyerarşisi kapalı mumda
-            and smi_early_ok_L                                    # SMI açık yeşil
-            and is_green                                          # mum yeşil
-        )
-        confirm_1030_S = (
-            (bars_since_1030_dn <= CROSS_1030_CONFIRM_BARS)      # 10/30 down'dan sonra ≤5 mum
-            and (e10.iloc[-2] < e30.iloc[-2] < e90.iloc[-2])     # 10<30<90 hiyerarşisi kapalı mumda
-            and smi_early_ok_S                                    # SMI açık kırmızı
-            and is_red                                            # mum kırmızı
-        )
-        # Rejim flip'ten beri retest oldu mu?
-        state_bars_flip = state.get('bars_since_regime_flip', 10**6)
-        retest_after_flip_L = (_bars_since_last(pd.Series([retest_long] * len(df), index=df.index)) <= state_bars_flip)  # flip'ten sonra long retest görülmüş
-        retest_after_flip_S = (_bars_since_last(pd.Series([retest_short] * len(df), index=df.index)) <= state_bars_flip)  # flip'ten sonra short retest görülmüş
-        # Geç (retestsiz) tetik için: rejim açık + flip'ten beri en az 15 mum + retest hiç olmadı
-        late_long_ok = (regime_long and state_bars_flip >= LATE_WAIT_BARS and not retest_after_flip_L)
-        late_short_ok = (regime_short and state_bars_flip >= LATE_WAIT_BARS and not retest_after_flip_S)
-        regime_long = (e30.iloc[-2] > e90.iloc[-2])
-        regime_short = (e30.iloc[-2] < e90.iloc[-2])
-        regime_cross_up = regime_long and not (e30.iloc[-3] > e90.iloc[-3]) if len(e30) >= 3 else False
-        regime_cross_dn = regime_short and not (e30.iloc[-3] < e90.iloc[-3]) if len(e30) >= 3 else False
-        retest_confirm_ok_L = (
-            in_early_L
-            and retest_long
+            (bars_since_1030_up <= CROSS_1030_CONFIRM_BARS)
+            and (e10.iloc[-2] > e30.iloc[-2] > e90.iloc[-2])
             and smi_early_ok_L
             and is_green
         )
-        retest_confirm_ok_S = (
-            in_early_S
-            and retest_short
+        confirm_1030_S = (
+            (bars_since_1030_dn <= CROSS_1030_CONFIRM_BARS)
+            and (e10.iloc[-2] < e30.iloc[-2] < e90.iloc[-2])
             and smi_early_ok_S
             and is_red
         )
-        # --- Erken (Retest + ≤5 mumda SMI açık yeşil/kırmızı + mum rengi) ---
+        bars_since_retest_L = _last_retest_bars(df, side="long", window=EPOCH_EARLY_BARS, k=RETEST_K_ATR)
+        bars_since_retest_S = _last_retest_bars(df, side="short", window=EPOCH_EARLY_BARS, k=RETEST_K_ATR)
+        retest_recent_L = (bars_since_retest_L <= RETEST_CONFIRM_BARS)
+        retest_recent_S = (bars_since_retest_S <= RETEST_CONFIRM_BARS)
+        retest_confirm_ok_L = (in_early_L and retest_recent_L and smi_early_ok_L and is_green)
+        retest_confirm_ok_S = (in_early_S and retest_recent_S and smi_early_ok_S and is_red)
         buy_early = (
             retest_confirm_ok_L
             and trend_ok_long and dir_long_ok
@@ -976,7 +960,6 @@ async def check_signals(symbol, timeframe='4h'):
             and ok_s and trap_ok_short and froth_ok_short
             and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
         )
-        # --- 10/30 onay penceresi (≤5 mum) ---
         buy_1030 = (
             confirm_1030_L
             and trend_ok_long and dir_long_ok
@@ -989,27 +972,14 @@ async def check_signals(symbol, timeframe='4h'):
             and ok_s and trap_ok_short and froth_ok_short
             and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
         )
-        # --- Geç (retestsiz 15 mum) ---
-        buy_late = (
-            (not in_early_L) and late_long_ok
-            and smi_early_ok_L and is_green
-            and trend_ok_long and dir_long_ok
-            and ok_l and trap_ok_long and froth_ok_long
-            and (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
-        )
-        sell_late = (
-            (not in_early_S) and late_short_ok
-            and smi_early_ok_S and is_red
-            and trend_ok_short and dir_short_ok
-            and ok_s and trap_ok_short and froth_ok_short
-            and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
-        )
+        regime_long = (e30.iloc[-2] > e90.iloc[-2])
+        regime_short = (e30.iloc[-2] < e90.iloc[-2])
+        regime_cross_up = regime_long and not (e30.iloc[-3] > e90.iloc[-3]) if len(e30) >= 3 else False
+        regime_cross_dn = regime_short and not (e30.iloc[-3] < e90.iloc[-3]) if len(e30) >= 3 else False
         async with _state_lock:
             state = signal_cache.get(symbol, {})
             bars_since_flip = state.get('bars_since_regime_flip', 10**6)
-            if regime_cross_up:
-                bars_since_flip = 0
-            elif regime_cross_dn:
+            if regime_cross_up or regime_cross_dn:
                 bars_since_flip = 0
             elif bars_since_flip < 10**6:
                 bars_since_flip += 1
@@ -1030,17 +1000,35 @@ async def check_signals(symbol, timeframe='4h'):
             )
             debounce_ok_long = (bars_since_flip >= wait_long)
             debounce_ok_short = (bars_since_flip >= wait_short)
+            retest_after_flip_L = (bars_since_retest_L <= bars_since_flip)
+            retest_after_flip_S = (bars_since_retest_S <= bars_since_flip)
+            late_long_ok = (regime_long and bars_since_flip >= LATE_WAIT_BARS and not retest_after_flip_L)
+            late_short_ok = (regime_short and bars_since_flip >= LATE_WAIT_BARS and not retest_after_flip_S)
+            buy_late = (
+                (not in_early_L) and late_long_ok
+                and smi_early_ok_L and is_green
+                and trend_ok_long and dir_long_ok
+                and ok_l and trap_ok_long and froth_ok_long
+                and (closed_candle['close'] > closed_candle['ema30'] and closed_candle['close'] > closed_candle['ema90'])
+            )
+            sell_late = (
+                (not in_early_S) and late_short_ok
+                and smi_early_ok_S and is_red
+                and trend_ok_short and dir_short_ok
+                and ok_s and trap_ok_short and froth_ok_short
+                and (closed_candle['close'] < closed_candle['ema30'] and closed_candle['close'] < closed_candle['ema90'])
+            )
             buy_condition_ema = buy_early or buy_1030 or buy_late
             sell_condition_ema = sell_early or sell_1030 or sell_late
             buy_condition = (debounce_ok_long and buy_condition_ema) if APPLY_DEBOUNCE_EMA else buy_condition_ema
             sell_condition = (debounce_ok_short and sell_condition_ema) if APPLY_DEBOUNCE_EMA else sell_condition_ema
             eff_trap_max_early = eff_trap_max - EARLY_TRAP_MARGIN if (EARLY_EXTRA_FILTER and bars_since_flip <= max(DEB_WEAK, DEB_MED)) else eff_trap_max
-            trap_ok_long_early = (bull_score["score"] <= eff_trap_max_early)
-            trap_ok_short_early = (bear_score["score"] <= eff_trap_max_early)
             if EARLY_EXTRA_FILTER and bars_since_flip <= max(DEB_WEAK, DEB_MED):
+                trap_ok_long_early = (bull_score["score"] <= eff_trap_max_early)
+                trap_ok_short_early = (bear_score["score"] <= eff_trap_max_early)
                 buy_condition = buy_condition and trap_ok_long_early
                 sell_condition = sell_condition and trap_ok_short_early
-            logger.info(f"{symbol} {timeframe} triggers: earlyL={buy_early} 1030L={buy_1030} lateL={buy_late} | earlyS={sell_early} 1030S={sell_1030} lateS={sell_late}")
+            logger.info(f"{symbol Այսպե՞ս symbol} {timeframe} triggers: earlyL={buy_early} 1030L={buy_1030} lateL={buy_late} | earlyS={sell_early} 1030S={sell_1030} lateS={sell_late}")
             logger.info(f"{symbol} {timeframe} EMA: buy={buy_condition_ema} sell={sell_condition_ema}")
             logger.info(f"{symbol} {timeframe} debounce wait L:{wait_long} S:{wait_short} bars_since_flip:{bars_since_flip}")
             current_pos = state.get('position', None)
@@ -1152,7 +1140,6 @@ async def main_loop():
         await load_markets()
         main_loop.last_markets_refresh = now
     symbols = await discover_bybit_symbols(linear_only=LINEAR_ONLY, quote_whitelist=QUOTE_WHITELIST)
-    # Env sharding: her instance kendi dilimini tarasın
     if SHARDS > 1:
         before = len(symbols)
         symbols = [s for i, s in enumerate(symbols) if (i % SHARDS) == SHARD_INDEX]
@@ -1185,7 +1172,9 @@ async def main():
             await telegram_bot.send_message(chat_id=CHAT_ID, text="🟢 Bot başlatıldı.")
         asyncio.create_task(message_sender())
         while True:
-            await main_loop()
+            await main
+
+_loop()
             await asyncio.sleep(SCAN_INTERVAL_SEC)
     except Exception as e:
         logger.error(f"Main loop hata: {str(e)}")
