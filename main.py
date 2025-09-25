@@ -16,7 +16,7 @@ from urllib3.util.retry import Retry
 from logging.handlers import RotatingFileHandler
 import json
 from telegram.request import HTTPXRequest
-from typing import Tuple
+from typing import Tuple, Optional
 
 # ================== Logging ==================
 logger = logging.getLogger()
@@ -286,10 +286,13 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
                     if wait > 0:
                         await asyncio.sleep(wait)
                     _last_call_ts = asyncio.get_event_loop().time()
-                return await asyncio.wait_for(
+                ohlcv = await asyncio.wait_for(
                     asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit),
                     timeout=HARD_TIMEOUT
                 )
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).tz_convert('Europe/Istanbul').tz_localize(None)
+                return df
         except asyncio.TimeoutError:
             backoff = (2 ** attempt) * 1.5
             logger.warning(f"Timeout (hard) {symbol} {timeframe}, backoff {backoff:.1f}s")
@@ -467,10 +470,6 @@ def calculate_indicators(df, symbol, timeframe):
         logger.warning(f"DF çok kısa ({len(df)}), indikatör hesaplanamadı.")
         return None, None, None, None, None, None
     if 'timestamp' in df.columns:
-        if np.issubdtype(df['timestamp'].dtype, np.integer):
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
-        else:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
         df.set_index('timestamp', inplace=True)
     closes = df['close'].values.astype(np.float64)
     df['ema10'] = calculate_ema(closes, EMA_FAST)
@@ -585,7 +584,7 @@ def ntx_rising_strict(s: pd.Series, k: int = NTX_RISE_K_STRICT, min_net: float =
     net = w.iloc[-1] - w.iloc[0]
     return (slope > 0) and (net >= min_net) and (posr >= pos_ratio_th)
 
-def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE_EPS, min_ntx: float = NTX_MIN_FOR_HYBRID, k: int = NTX_RISE_K_HYBRID, froth_k: float = NTX_FROTH_K, trap_margin: float = NTX_HYBRID_TRAP_MARGIN, eff_trap_max: float = 39.0, trap_score_current: float | None = None) -> bool:
+def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE_EPS, min_ntx: float = NTX_MIN_FOR_HYBRID, k: int = NTX_RISE_K_HYBRID, froth_k: float = NTX_FROTH_K, trap_margin: float = NTX_HYBRID_TRAP_MARGIN, eff_trap_max: float = 39.0, trap_score_current: Optional[float] = None) -> bool:
     s = df['ntx'] if 'ntx' in df.columns else None
     if s is None or len(s) < k + 1:
         return False
@@ -729,7 +728,7 @@ def volume_gate(df: pd.DataFrame, side: str, atr_ratio: float, symbol: str = "",
         roll = dv.rolling(VOL_LIQ_ROLL, min_periods=VOL_LIQ_ROLL)
         q = roll.apply(lambda x: np.nanquantile(x, VOL_LIQ_QUANTILE), raw=True)
         qv = float(q.iloc[-2]) if pd.notna(q.iloc[-2]) else 0.0
-        dyn_min = _ Channels: dynamic_liq_floor(dv)
+        dyn_min = _dynamic_liq_floor(dv)
         if is_major:
             dyn_min = max(dyn_min, VOL_LIQ_MIN_DVOL_USD)
         hard_min = max(qv, dyn_min)
@@ -759,8 +758,8 @@ def volume_gate(df: pd.DataFrame, side: str, atr_ratio: float, symbol: str = "",
     buffer = 0.90 if is_major else 0.95
     ok = dvol_usd > (need * buffer)
     if not ok:
-        return False, f"SOFT_GATE dvol={dvol_usd:.0f} ≤ need>{need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f}, buf={buffer:.2f})"
-    return True, f"OK dvol={dvol_usd:.0f} > need>{need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f})"
+        return False, f"SOFT_GATE dvol={dvol_usd:.0f} ≤ need={need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f}, buf={buffer:.2f})"
+    return True, f"OK dvol={dvol_usd:.0f} > need={need:.0f} (ref={dvol_ref:.0f}, mult={mult:.2f}, relax={relax:.2f})"
 
 # === SMI shade classifier ===
 def smi_shade(smi_val: float, atr_val: float, norm_cap: float, split: float = 0.50) -> str:
@@ -775,14 +774,6 @@ def smi_shade(smi_val: float, atr_val: float, norm_cap: float, split: float = 0.
         return "light_red" if (0 <= a < thr) else "dark_red"
 
 # ================== Retest Mantığı (Erken Pencere) ==================
-def _retested_within(df, bars=EPOCH_EARLY_BARS, k=RETEST_K_ATR):
-    sub = df.iloc[-(bars+1):-1]
-    dist = (sub['ema30'] - sub['low']).abs()
-    ret_L = (dist <= k*sub['atr']).any()
-    dist = (sub['ema30'] - sub['high']).abs()
-    ret_S = (dist <= k*sub['atr']).any()
-    return bool(ret_L), bool(ret_S)
-
 def _last_retest_bars(df: pd.DataFrame, side: str = "long", window: int = EPOCH_EARLY_BARS, k: float = RETEST_K_ATR) -> int:
     """
     Son retest'in kapalı muma (iloc[-2]) göre kaç bar önce olduğunu döndürür.
@@ -812,6 +803,7 @@ async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
     try:
         if TEST_MODE:
+            np.random.seed(42)  # Reprodüksiyon için seed
             N = 200
             ts0 = int(time.time()*1000) - N*4*60*60*1000
             closes = np.abs(np.cumsum(np.random.randn(N))) * 0.05 + 0.3
@@ -823,8 +815,7 @@ async def check_signals(symbol, timeframe='4h'):
             logger.info(f"Test modu: {symbol} {timeframe}")
         else:
             limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40, SCORING_WIN + 5)
-            ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
         if df is None or df.empty or len(df) < 80:
             logger.warning(f"{symbol}: Yetersiz veri ({len(df) if df is not None else 0} mum), skip.")
             return
@@ -1028,7 +1019,10 @@ async def check_signals(symbol, timeframe='4h'):
                 trap_ok_short_early = (bear_score["score"] <= eff_trap_max_early)
                 buy_condition = buy_condition and trap_ok_long_early
                 sell_condition = sell_condition and trap_ok_short_early
-            logger.info(f"{symbol Այսպե՞ս symbol} {timeframe} triggers: earlyL={buy_early} 1030L={buy_1030} lateL={buy_late} | earlyS={sell_early} 1030S={sell_1030} lateS={sell_late}")
+            logger.info(
+                f"{symbol} {timeframe} triggers: earlyL={buy_early} 1030L={buy_1030} lateL={buy_late} | "
+                f"earlyS={sell_early} 1030S={sell_1030} lateS={sell_late}"
+            )
             logger.info(f"{symbol} {timeframe} EMA: buy={buy_condition_ema} sell={sell_condition_ema}")
             logger.info(f"{symbol} {timeframe} debounce wait L:{wait_long} S:{wait_short} bars_since_flip:{bars_since_flip}")
             current_pos = state.get('position', None)
@@ -1051,7 +1045,7 @@ async def check_signals(symbol, timeframe='4h'):
             price_str = fmt_sym(symbol, current_price if np.isfinite(current_price) else closed_candle['close'])
             if buy_condition and current_pos != 'long':
                 if sell_condition and APPLY_COOLDOWN_BOTH_DIRECTIONS:
-                    logger.info(f"{symbol} {timeframe} Çift yön sinyal, skip.")
+                    logger.info(f"{symbol} {timeframe} Çift yön sinyal (L:{buy_condition}, S:{sell_condition}), skip.")
                     signal_cache[symbol] = state
                     return
                 sl = float(df['close'].iloc[-2]) - SL_MULTIPLIER * atr_value
@@ -1063,7 +1057,7 @@ async def check_signals(symbol, timeframe='4h'):
                 tp2 = float(df['close'].iloc[-2]) + TP_MULTIPLIER2 * atr_value
                 sl = float(df['close'].iloc[-2]) - (SL_MULTIPLIER + SL_BUFFER) * atr_value
                 msg = (
-                    f"📈 {symbol} {timeframe} AL sinyali\n"
+                    f"📈 {symbol} {timeframe} LONG sinyali\n"
                     f"💰 Fiyat: {price_str} USDT\n"
                     f"🎯 TP1: {fmt_sym(symbol, tp1)} ({TP_MULTIPLIER1}x ATR)\n"
                     f"🎯 TP2: {fmt_sym(symbol, tp2)} ({TP_MULTIPLIER2}x ATR)\n"
@@ -1085,7 +1079,7 @@ async def check_signals(symbol, timeframe='4h'):
                 logger.info(f"{symbol} {timeframe} LONG sinyali: {msg}")
             elif sell_condition and current_pos != 'short':
                 if buy_condition and APPLY_COOLDOWN_BOTH_DIRECTIONS:
-                    logger.info(f"{symbol} {timeframe} Çift yön sinyal, skip.")
+                    logger.info(f"{symbol} {timeframe} Çift yön sinyal (L:{buy_condition}, S:{sell_condition}), skip.")
                     signal_cache[symbol] = state
                     return
                 sl = float(df['close'].iloc[-2]) + SL_MULTIPLIER * atr_value
@@ -1159,6 +1153,7 @@ async def main_loop():
     elapsed = time.time() - loop_start
     sleep_sec = max(0.0, SCAN_INTERVAL_SEC - elapsed)
     logger.info(f"Tur bitti, {total_scanned} sembol tarandı, {elapsed:.1f}s sürdü, {sleep_sec:.1f}s bekle...")
+    await asyncio.sleep(sleep_sec)
 
 # ================== Başlangıç ==================
 _state_lock = asyncio.Lock()
@@ -1172,15 +1167,12 @@ async def main():
             await telegram_bot.send_message(chat_id=CHAT_ID, text="🟢 Bot başlatıldı.")
         asyncio.create_task(message_sender())
         while True:
-            await main
-
-_loop()
-            await asyncio.sleep(SCAN_INTERVAL_SEC)
+            await main_loop()  # main_loop tarayıp dinamik bekliyor
     except Exception as e:
         logger.error(f"Main loop hata: {str(e)}")
         if not TEST_MODE and telegram_bot:
             await telegram_bot.send_message(chat_id=CHAT_ID, text=f"🔴 Bot hata: {str(e)}")
-        await asyncio.sleep(SCAN_INTERVAL_SEC)
+        await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
