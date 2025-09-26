@@ -15,6 +15,168 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from logging.handlers import RotatingFileHandler
 import json
+
+# ================== Sabit Değerler ==================
+# Güvenlik: ENV zorunlu
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+if not BOT_TOKEN or not CHAT_ID:
+    raise RuntimeError("BOT_TOKEN ve CHAT_ID ortam değişkenlerini ayarla.")
+TEST_MODE = False
+VERBOSE_LOG = False
+
+# ---- Sinyal / Risk Parametreleri ----
+LOOKBACK_ATR = 18
+SL_MULTIPLIER = 1.8
+TP_MULTIPLIER1 = 2.0
+TP_MULTIPLIER2 = 3.5
+SL_BUFFER = 0.3
+COOLDOWN_MINUTES = 60
+INSTANT_SL_BUFFER = 0.05
+LOOKBACK_SMI = 20
+ADX_PERIOD = 14
+ADX_THRESHOLD = 15
+ADX_NORMAL_HIGH = 21
+APPLY_COOLDOWN_BOTH_DIRECTIONS = True
+
+# Retest sonrası onay ve 10/30 onay pencereleri
+RETEST_CONFIRM_BARS = 5
+LATE_WAIT_BARS = 15
+CROSS_1030_CONFIRM_BARS = 5
+
+# ==== SMI Light ====
+SMI_LIGHT_NORM_MAX = 0.75
+SMI_LIGHT_ADAPTIVE = True
+SMI_LIGHT_PCTL = 0.65
+SMI_LIGHT_MAX_MIN = 0.60
+SMI_LIGHT_MAX_MAX = 1.10
+SMI_LIGHT_REQUIRE_SQUEEZE = False
+USE_SMI_SLOPE_CONFIRM = True
+USE_FROTH_GUARD = True
+FROTH_GUARD_K_ATR = 1.1
+
+# === ADX sinyal modu ===
+SIGNAL_MODE = "2of3"
+REQUIRE_DIRECTION = False
+
+# ---- Rate-limit & tarama pacing ----
+MAX_CONCURRENT_FETCHES = 4
+RATE_LIMIT_MS = 200
+N_SHARDS = 5
+BATCH_SIZE = 10
+INTER_BATCH_SLEEP = 5.0
+
+# ---- Sembol keşif ----
+LINEAR_ONLY = True
+QUOTE_WHITELIST = ("USDT",)
+
+# ==== Basit Hacim + FakeFilter v2 ====
+VOL_WIN = 60
+VOL_Q = 0.60
+VOL_MA_RATIO_MIN = 1.10
+VOL_Z_MIN = 1.5
+FF_BODY_MIN = 0.55
+FF_UPWICK_MAX = 0.25
+FF_DNWICK_MAX = 0.25
+FF_BB_MIN = 0.30
+
+# OBV eğimi penceresi (FakeFilter v2 için lazım)
+OBV_SLOPE_WIN = 5
+
+# ==== NTX ====
+NTX_PERIOD = 14
+NTX_K_EFF = 10
+NTX_VOL_WIN = 60
+NTX_THR_LO, NTX_THR_HI = 52.0, 60.0
+NTX_ATRZ_LO, NTX_ATRZ_HI = -1.0, 1.5
+NTX_MIN_FOR_HYBRID = 50.0
+NTX_RISE_K_STRICT = 5
+NTX_RISE_MIN_NET = 1.0
+NTX_RISE_POS_RATIO = 0.6
+NTX_RISE_EPS = 0.05
+NTX_RISE_K_HYBRID = 3
+NTX_FROTH_K = 1.0
+
+# ==== EMA 10/30/90 Parametreleri ====
+EMA_FAST = 10
+EMA_MID = 30
+EMA_SLOW = 90
+SLOPE_WINDOW = 5
+CONFIRM_K_ATR = 0.20
+RETEST_K_ATR = 0.30
+D_K_ATR = 0.10
+USE_STACK_ONLY = False
+USE_STACK_FRESH = True
+
+# ==== Debounce ayarları ====
+DEB_WEAK = 3
+DEB_MED = 2
+DEB_STR = 1
+ADX_SOFT = 28
+ADX_HARD = 35
+REQUIRE_RISING_FOR_SOFT = True
+REQUIRE_DI_FOR_HARD = True
+REQUIRE_NTX_FOR_HARD = True
+EARLY_EXTRA_FILTER = True
+
+def _risk_label(score: float) -> str:
+    if score < 20: return "Çok düşük risk 🟢"
+    if score < 40: return "Düşük risk 🟢"
+    if score < 60: return "Orta risk ⚠️"
+    if score < 80: return "Yüksek risk 🟠"
+    return "Aşırı risk 🔴"
+
+# ================== Logging ==================
+logger = logging.getLogger()
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    file_handler = RotatingFileHandler('bot.log', maxBytes=5_000_000, backupCount=3)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+logging.getLogger('telegram').setLevel(logging.ERROR)
+logging.getLogger('httpx').setLevel(logging.ERROR)
+
+# ================== Borsa & Bot ==================
+exchange = ccxt.bybit({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'linear'},
+    'timeout': 60000
+})
+MARKETS = {}
+
+async def load_markets():
+    global MARKETS
+    MARKETS = await asyncio.to_thread(exchange.load_markets)
+
+def configure_exchange_session(exchange, pool=50):
+    s = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=pool,
+        pool_maxsize=pool,
+        max_retries=Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
+    )
+    s.mount('https://',```python
+import ccxt
+import numpy as np
+import pandas as pd
+import telegram
+import logging
+import asyncio
+from datetime import datetime, timedelta
+import time
+import pytz
+import sys
+import os
+import random
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from logging.handlers import RotatingFileHandler
+import json
 # ================== Sabit Değerler ==================
 # Güvenlik: ENV zorunlu
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -62,24 +224,6 @@ INTER_BATCH_SLEEP = 5.0
 # ---- Sembol keşif ----
 LINEAR_ONLY = True
 QUOTE_WHITELIST = ("USDT",)
-# ================== TRAP SKORLAMA ==================
-USE_TRAP_SCORING = True
-SCORING_CTX_BARS = 3
-SCORING_WIN = 120
-W_WICK = 20.0
-W_VOL = 20.0
-W_BBPROX = 15.0
-W_ATRZ = 15.0
-W_RSI = 15.0
-W_MISC = 5.0
-W_FB = 10.0
-RSI_LONG_EXCESS = 70.0
-RSI_SHORT_EXCESS = 30.0
-TRAP_ONLY_LOW = True
-TRAP_MAX_SCORE = 39.0
-TRAP_TIGHT_MAX = 35.0
-TRAP_DYN_USE = False
-TRAP_BASE_MAX = 39.0
 # ==== Basit Hacim + FakeFilter v2 ====
 VOL_WIN = 60
 VOL_Q = 0.60
@@ -104,12 +248,10 @@ NTX_RISE_POS_RATIO = 0.6
 NTX_RISE_EPS = 0.05
 NTX_RISE_K_HYBRID = 3
 NTX_FROTH_K = 1.0
-NTX_HYBRID_TRAP_MARGIN = 3.0
 # ==== EMA 10/30/90 Parametreleri ====
 EMA_FAST = 10
 EMA_MID = 30
 EMA_SLOW = 90
-CROSS_FRESH_BARS = 4
 SLOPE_WINDOW = 5
 CONFIRM_K_ATR = 0.20
 RETEST_K_ATR = 0.30
@@ -126,7 +268,6 @@ REQUIRE_RISING_FOR_SOFT = True
 REQUIRE_DI_FOR_HARD = True
 REQUIRE_NTX_FOR_HARD = True
 EARLY_EXTRA_FILTER = True
-EARLY_TRAP_MARGIN = 3.0
 def _risk_label(score: float) -> str:
     if score < 20: return "Çok düşük risk 🟢"
     if score < 40: return "Düşük risk 🟢"
@@ -530,7 +671,7 @@ def ntx_rising_strict(s: pd.Series, k: int = NTX_RISE_K_STRICT, min_net: float =
     posr = (diffs > eps).mean() if diffs.size else 0.0
     net = w.iloc[-1] - w.iloc[0]
     return (slope > 0) and (net >= min_net) and (posr >= pos_ratio_th)
-def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE_EPS, min_ntx: float = NTX_MIN_FOR_HYBRID, k: int = NTX_RISE_K_HYBRID, froth_k: float = NTX_FROTH_K, trap_margin: float = NTX_HYBRID_TRAP_MARGIN, eff_trap_max: float = 39.0, trap_score_current: float | None = None) -> bool:
+def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE_EPS, min_ntx: float = NTX_MIN_FOR_HYBRID, k: int = NTX_RISE_K_HYBRID, froth_k: float = NTX_FROTH_K) -> bool:
     s = df['ntx'] if 'ntx' in df.columns else None
     if s is None or len(s) < k + 1: return False
     w = s.iloc[-(k+1):-1].astype(float)
@@ -546,12 +687,8 @@ def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE
         return False
     if abs(close_last - ema10_last) > froth_k * atr_value:
         return False
-    if trap_score_current is None:
-        trap_score_current = compute_trap_scores(df, side=side)["score"]
-    if trap_score_current >= (eff_trap_max - trap_margin):
-        return False
     return True
-# ================== TRAP SKORLAMA HESABI ==================
+# ================== Candle Body/Wicks (FakeFilter için) ==================
 def candle_body_wicks(row):
     o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
     rng = max(h - l, 1e-12)
@@ -559,78 +696,6 @@ def candle_body_wicks(row):
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
     return body / rng, upper_wick / rng, lower_wick / rng
-def _fitil_bias_sig(last_row, ctx_u_median, ctx_l_median, side="long", deadband=0.05, scale=0.50):
-    body, u, l = candle_body_wicks(last_row)
-    u_ref = max(ctx_u_median, 1e-6)
-    l_ref = max(ctx_l_median, 1e-6)
-    u_adj = u / u_ref
-    l_adj = l / l_ref
-    if side == "long":
-        diff = (u_adj - l_adj)
-    else:
-        diff = (l_adj - u_adj)
-    if abs(diff) <= deadband:
-        return 0.0
-    if diff < 0:
-        return 0.0
-    return clamp(diff / scale, 0.0, 1.0)
-def compute_trap_scores(df: pd.DataFrame, side: str = "long") -> dict:
-    try:
-        ctx = df.iloc[-(SCORING_CTX_BARS+1):-1]
-        last = df.iloc[-2]
-        body_u_l = ctx.apply(candle_body_wicks, axis=1, result_type='expand')
-        body_ctx = float(body_u_l[0].median()) if not body_u_l.empty else 0.0
-        upper_ctx = float(body_u_l[1].median()) if not body_u_l.empty else 0.0
-        lower_ctx = float(body_u_l[2].median()) if not body_u_l.empty else 0.0
-        wick_ctx = upper_ctx if side == "long" else lower_ctx
-        vol_z_ctx = float(ctx['vol_z'].median()) if 'vol_z' in ctx else 0.0
-        vol_ma = float(last.get('vol_ma', np.nan))
-        vol_now = float(last['volume'])
-        vol_ratio = (vol_now / vol_ma) if (np.isfinite(vol_ma) and vol_ma > 0) else 1.0
-        vol_sig = np.tanh(max(0.0, vol_z_ctx) / 3.0)
-        vol_sig = max(vol_sig, np.tanh(max(0.0, vol_ratio - 1.0)))
-        if side == "long":
-            num = float(last['close'] - last['bb_mid'])
-            den = float(last['bb_upper'] - last['bb_mid'])
-        else:
-            num = float(last['bb_mid'] - last['close'])
-            den = float(last['bb_mid'] - last['bb_lower'])
-        bb_prox = clamp(num / (den + 1e-12), 0.0, 1.0) if np.isfinite(num) and np.isfinite(den) else 0.0
-        atr_z = rolling_z(df['atr'], SCORING_WIN) if 'atr' in df else 0.0
-        atr_sig = clamp((atr_z + 1.0) / 3.0, 0.0, 1.0)
-        rsi_ctx = float(ctx['rsi'].median()) if 'rsi' in ctx else 50.0
-        if side == "long":
-            rsi_sig = clamp((rsi_ctx - RSI_LONG_EXCESS) / 20.0, 0.0, 1.0)
-        else:
-            rsi_sig = clamp((RSI_SHORT_EXCESS - rsi_ctx) / 20.0, 0.0, 1.0)
-        misc = 0.0
-        if 'adx' in last and np.isfinite(last['adx']) and last['adx'] < ADX_THRESHOLD:
-            misc += 0.5
-        if 'squeeze_on' in last and bool(last['squeeze_on']):
-            misc += 0.5
-        misc_sig = clamp(misc / 1.0, 0.0, 1.0)
-        wick_sig = clamp((wick_ctx - 0.25) / 0.5, 0.0, 1.0)
-        if len(df) >= SCORING_WIN:
-            wick_ref = df.iloc[-(SCORING_WIN+1):-1].apply(candle_body_wicks, axis=1, result_type='expand')
-            if not wick_ref.empty:
-                uref = float(wick_ref[1].median()) if side == "long" else float(wick_ref[2].median())
-                if np.isfinite(uref) and uref > 0:
-                    wick_sig *= clamp(0.8 + 0.4 * (0.5 / (uref + 1e-9)), 0.5, 1.2)
-        fb_sig = _fitil_bias_sig(last, upper_ctx, lower_ctx, side=side, deadband=0.05, scale=0.50)
-        score = (
-            W_WICK * wick_sig +
-            W_VOL * vol_sig +
-            W_BBPROX * bb_prox +
-            W_ATRZ * atr_sig +
-            W_RSI * rsi_sig +
-            W_MISC * misc_sig +
-            W_FB * fb_sig
-        )
-        score = float(clamp(score, 0.0, 100.0))
-        return {"score": score, "label": _risk_label(score)}
-    except Exception as e:
-        logger.warning(f"compute_trap_scores hata: {e}")
-        return {"score": 0.0, "label": _risk_label(0.0)}
 # === FakeFilter v2 ===
 def _bb_prox(last, side="long"):
     if side == "long":
@@ -693,7 +758,7 @@ async def check_signals(symbol, timeframe='4h'):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             logger.info(f"Test modu: {symbol} {timeframe}")
         else:
-            limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40, SCORING_WIN + 5)
+            limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40)
             ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             if df is None or df.empty or len(df) < 80:
@@ -715,7 +780,7 @@ async def check_signals(symbol, timeframe='4h'):
         smi_norm = (smi_raw / atr_for_norm) if np.isfinite(smi_raw) else np.nan
         if SMI_LIGHT_ADAPTIVE:
             smi_norm_series = (df['smi'] / df['atr']).replace([np.inf, -np.inf], np.nan)
-            ref = smi_norm_series.iloc[-(SCORING_WIN+1):-1].abs() if len(df) >= SCORING_WIN else smi_norm_series.abs()
+            ref = smi_norm_series.iloc[-(LOOKBACK_SMI+1):-1].abs() if len(df) >= LOOKBACK_SMI else smi_norm_series.abs()
             if ref.notna().sum() >= 30:
                 pct_val = float(np.nanpercentile(ref, SMI_LIGHT_PCTL * 100))
                 SMI_LIGHT_NORM_MAX_EFF = clamp(pct_val, SMI_LIGHT_MAX_MIN, SMI_LIGHT_MAX_MAX)
@@ -740,7 +805,7 @@ async def check_signals(symbol, timeframe='4h'):
         # ADX ve NTX
         adx_ok = adx_condition
         rising_adx = adx_rising(df)
-        atr_z = rolling_z(df['atr'], SCORING_WIN) if 'atr' in df else 0.0
+        atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
         ntx_thr = ntx_threshold(atr_z)
         ntx_last = float(df['ntx'].iloc[-2]) if pd.notna(df['ntx'].iloc[-2]) else np.nan
         ntx_ok = (np.isfinite(ntx_last) and ntx_last >= ntx_thr)
@@ -770,13 +835,6 @@ async def check_signals(symbol, timeframe='4h'):
         fk_ok_S, fk_dbg_S = fake_filter_v2(df, side="short")
         logger.info(f"{symbol} {timeframe} FK_LONG {fk_ok_L} | {fk_dbg_L}")
         logger.info(f"{symbol} {timeframe} FK_SHORT {fk_ok_S} | {fk_dbg_S}")
-        # Trap
-        bull_score = compute_trap_scores(df, side="long") if USE_TRAP_SCORING else {"score": 0.0, "label": _risk_label(0.0)}
-        bear_score = compute_trap_scores(df, side="short") if USE_TRAP_SCORING else {"score": 0.0, "label": _risk_label(0.0)}
-        eff_trap_max = TRAP_BASE_MAX
-        trap_ok_long = (bull_score["score"] <= eff_trap_max)
-        trap_ok_short = (bear_score["score"] <= eff_trap_max)
-        logger.info(f"{symbol} {timeframe} trap_thr:{eff_trap_max:.2f}")
         # Froth
         base_K = FROTH_GUARD_K_ATR
         K_long = min(base_K * 1.2, 1.3) if trend_strong_long else base_K
@@ -841,7 +899,6 @@ async def check_signals(symbol, timeframe='4h'):
             and is_green
             and dir_long_ok
             and fk_ok_L
-            and trap_ok_long
             and froth_ok_long
             and (closed_candle['close'] > closed_candle['ema30'] > closed_candle['ema90'])
         )
@@ -851,7 +908,6 @@ async def check_signals(symbol, timeframe='4h'):
             and is_red
             and dir_short_ok
             and fk_ok_S
-            and trap_ok_short
             and froth_ok_short
             and (closed_candle['close'] < closed_candle['ema30'] < closed_candle['ema90'])
         )
@@ -859,7 +915,6 @@ async def check_signals(symbol, timeframe='4h'):
             confirm_1030_L
             and dir_long_ok
             and fk_ok_L
-            and trap_ok_long
             and froth_ok_long
             and (closed_candle['close'] > closed_candle['ema30'] > closed_candle['ema90'])
         )
@@ -867,7 +922,6 @@ async def check_signals(symbol, timeframe='4h'):
             confirm_1030_S
             and dir_short_ok
             and fk_ok_S
-            and trap_ok_short
             and froth_ok_short
             and (closed_candle['close'] < closed_candle['ema30'] < closed_candle['ema90'])
         )
@@ -877,7 +931,6 @@ async def check_signals(symbol, timeframe='4h'):
             and is_green
             and dir_long_ok
             and fk_ok_L
-            and trap_ok_long
             and froth_ok_long
             and (closed_candle['close'] > closed_candle['ema30'] > closed_candle['ema90'])
         )
@@ -887,7 +940,6 @@ async def check_signals(symbol, timeframe='4h'):
             and is_red
             and dir_short_ok
             and fk_ok_S
-            and trap_ok_short
             and froth_ok_short
             and (closed_candle['close'] < closed_candle['ema30'] < closed_candle['ema90'])
         )
@@ -908,9 +960,9 @@ async def check_signals(symbol, timeframe='4h'):
         # Flip sonrası ekstra filtre
         if EARLY_EXTRA_FILTER:
             if reg_dir == 'long' and not debounce_ok_long:
-                buy_condition = buy_condition and retest_long and di_long and (bull_score["score"] <= TRAP_MAX_SCORE - EARLY_TRAP_MARGIN)
+                buy_condition = buy_condition and retest_long and di_long
             if reg_dir == 'short' and not debounce_ok_short:
-                sell_condition = sell_condition and retest_short and di_short and (bear_score["score"] <= TRAP_MAX_SCORE - EARLY_TRAP_MARGIN)
+                sell_condition = sell_condition and retest_short and di_short
         # Sebep
         if buy_condition:
             reason = "Erken (Retest)" if buy_early else "10/30 Onay" if buy_1030 else "Geç (Retestsiz)"
@@ -919,7 +971,7 @@ async def check_signals(symbol, timeframe='4h'):
         else:
             reason = ""
         logger.info(f"{symbol} {timeframe} buy_early:{buy_early} buy_1030:{buy_1030} buy_late:{buy_late} sell_early:{sell_early} sell_1030:{sell_1030} sell_late:{sell_late}")
-        logger.info(f"{symbol} {timeframe} buy:{buy_condition} sell:{sell_condition} riskL:{bull_score['label']} riskS:{bear_score['label']}")
+        logger.info(f"{symbol} {timeframe} buy:{buy_condition} sell:{sell_condition}")
         if buy_condition and sell_condition:
             logger.warning(f"{symbol} {timeframe}: Çakışan sinyaller, işlem yapılmadı.")
             return
@@ -994,7 +1046,6 @@ async def check_signals(symbol, timeframe='4h'):
                 else:
                     tp1_price = entry_price + (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price + (TP_MULTIPLIER2 * atr_value)
-                    trap_line = f"\nTrap Risk (Bull): {int(bull_score['score'])}/100 → {bull_score['label']}" if USE_TRAP_SCORING else ""
                     current_pos = {
                         'signal': 'buy', 'entry_price': entry_price, 'sl_price': sl_price,
                         'tp1_price': tp1_price, 'tp2_price': tp2_price, 'highest_price': entry_price,
@@ -1010,7 +1061,7 @@ async def check_signals(symbol, timeframe='4h'):
                         f"Entry: {fmt_sym(symbol, entry_price)}\n"
                         f"SL: {fmt_sym(symbol, sl_price)}\n"
                         f"TP1: {fmt_sym(symbol, tp1_price)}\n"
-                        f"TP2: {fmt_sym(symbol, tp2_price)}{trap_line}"
+                        f"TP2: {fmt_sym(symbol, tp2_price)}"
                     )
                     save_state()
         # SELL pozisyon aç
@@ -1035,7 +1086,6 @@ async def check_signals(symbol, timeframe='4h'):
                 else:
                     tp1_price = entry_price - (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price - (TP_MULTIPLIER2 * atr_value)
-                    trap_line = f"\nTrap Risk (Bear): {int(bear_score['score'])}/100 → {bear_score['label']}" if USE_TRAP_SCORING else ""
                     current_pos = {
                         'signal': 'sell', 'entry_price': entry_price, 'sl_price': sl_price,
                         'tp1_price': tp1_price, 'tp2_price': tp2_price, 'highest_price': None,
@@ -1051,7 +1101,7 @@ async def check_signals(symbol, timeframe='4h'):
                         f"Entry: {fmt_sym(symbol, entry_price)}\n"
                         f"SL: {fmt_sym(symbol, sl_price)}\n"
                         f"TP1: {fmt_sym(symbol, tp1_price)}\n"
-                        f"TP2: {fmt_sym(symbol, tp2_price)}{trap_line}"
+                        f"TP2: {fmt_sym(symbol, tp2_price)}"
                     )
                     save_state()
         # Pozisyon yönetimi (LONG)
@@ -1122,7 +1172,7 @@ async def check_signals(symbol, timeframe='4h'):
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
                 current_pos['remaining_ratio'] -= 0.3
                 current_pos['sl_price'] = current_pos['entry_price']
-                current_pos['tp1_hit'] = True 
+                current_pos['tp1_hit'] = True
                 await enqueue_message(
                     f"{symbol} {timeframe}: TP1 Hit 🎯\n"
                     f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}\n"
@@ -1176,9 +1226,8 @@ async def check_signals(symbol, timeframe='4h'):
             signal_cache[key] = current_pos
         # Telemetri
         blocked_by_froth = 0 if froth_ok_long else 1
-        blocked_by_trap = 0 if trap_ok_long else 1
         passed_because_strong = 1 if trend_strong_long and not froth_ok_long else 0
-        logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} blocked_by_trap:{blocked_by_trap} passed_because_strong:{passed_because_strong}")
+        logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} passed_because_strong:{passed_because_strong}")
     except Exception as e:
         logger.exception(f"Hata ({symbol} {timeframe}): {str(e)}")
         return
