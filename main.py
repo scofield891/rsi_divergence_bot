@@ -15,16 +15,15 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from logging.handlers import RotatingFileHandler
 import json
+from collections import Counter
 
 # ================== Sabit Değerler ==================
-# Güvenlik: ENV zorunlu
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 if not BOT_TOKEN or not CHAT_ID:
     raise RuntimeError("BOT_TOKEN ve CHAT_ID ortam değişkenlerini ayarla.")
 TEST_MODE = False
 VERBOSE_LOG = False
-# ---- Sinyal / Risk Parametreleri ----
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8
 TP_MULTIPLIER1 = 2.0
@@ -37,11 +36,9 @@ ADX_PERIOD = 14
 ADX_THRESHOLD = 15
 ADX_NORMAL_HIGH = 21
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
-# Retest sonrası onay ve 10/30 onay pencereleri
 RETEST_CONFIRM_BARS = 5
 LATE_WAIT_BARS = 15
 CROSS_1030_CONFIRM_BARS = 5
-# ==== SMI Light ====
 SMI_LIGHT_NORM_MAX = 0.75
 SMI_LIGHT_ADAPTIVE = True
 SMI_LIGHT_PCTL = 0.65
@@ -51,19 +48,15 @@ SMI_LIGHT_REQUIRE_SQUEEZE = False
 USE_SMI_SLOPE_CONFIRM = True
 USE_FROTH_GUARD = True
 FROTH_GUARD_K_ATR = 1.1
-# === ADX sinyal modu ===
 SIGNAL_MODE = "2of3"
 REQUIRE_DIRECTION = False
-# ---- Rate-limit & tarama pacing ----
 MAX_CONCURRENT_FETCHES = 4
 RATE_LIMIT_MS = 200
 N_SHARDS = 5
 BATCH_SIZE = 10
 INTER_BATCH_SLEEP = 5.0
-# ---- Sembol keşif ----
 LINEAR_ONLY = True
 QUOTE_WHITELIST = ("USDT",)
-# ==== Basit Hacim + FakeFilter v2 ====
 VOL_WIN = 60
 VOL_Q = 0.60
 VOL_MA_RATIO_MIN = 1.10
@@ -72,9 +65,7 @@ FF_BODY_MIN = 0.55
 FF_UPWICK_MAX = 0.25
 FF_DNWICK_MAX = 0.25
 FF_BB_MIN = 0.30
-# OBV eğimi penceresi (FakeFilter v2 için lazım)
 OBV_SLOPE_WIN = 5
-# ==== NTX ====
 NTX_PERIOD = 14
 NTX_K_EFF = 10
 NTX_VOL_WIN = 60
@@ -87,7 +78,6 @@ NTX_RISE_POS_RATIO = 0.6
 NTX_RISE_EPS = 0.05
 NTX_RISE_K_HYBRID = 3
 NTX_FROTH_K = 1.0
-# ==== EMA 10/30/90 Parametreleri ====
 EMA_FAST = 10
 EMA_MID = 30
 EMA_SLOW = 90
@@ -97,7 +87,6 @@ RETEST_K_ATR = 0.30
 D_K_ATR = 0.10
 USE_STACK_ONLY = False
 USE_STACK_FRESH = True
-# ==== Debounce ayarları ====
 DEB_WEAK = 3
 DEB_MED = 2
 DEB_STR = 1
@@ -107,9 +96,8 @@ REQUIRE_RISING_FOR_SOFT = True
 REQUIRE_DI_FOR_HARD = True
 REQUIRE_NTX_FOR_HARD = True
 EARLY_EXTRA_FILTER = True
-# Yeni semboller için cooldown
 MIN_BARS = 80
-NEW_SYMBOL_COOLDOWN_MIN = 180  # 3 saat
+NEW_SYMBOL_COOLDOWN_MIN = 180
 
 def _risk_label(score: float) -> str:
     if score < 20: return "Çok düşük risk 🟢"
@@ -139,7 +127,11 @@ exchange = ccxt.bybit({
     'timeout': 60000
 })
 MARKETS = {}
-new_symbol_until = {}  # symbol -> datetime
+new_symbol_until = {}
+_stats_lock = asyncio.Lock()
+scan_status = {}
+crit_false_counts = Counter()
+crit_total_counts = Counter()
 
 async def load_markets():
     global MARKETS
@@ -233,11 +225,9 @@ def fmt_sym(symbol, x):
         return str(x)
 
 def _bars_since_last_true(mask: pd.Series) -> int:
-    # mask: bool seri. Sondan geriye doğru ilk True'u ara
     rev = mask.values[::-1]
     if not rev.any():
         return len(rev)
-    # rev'de ilk True'un indeksi, sondan itibaren geçen bar sayısıdır
     return int(np.argmax(rev))
 
 def get_regime(df: pd.DataFrame, use_adx=True, adx_th=ADX_SOFT) -> str:
@@ -247,6 +237,17 @@ def get_regime(df: pd.DataFrame, use_adx=True, adx_th=ADX_SOFT) -> str:
     if e30 > e90: return "bull"
     if e30 < e90: return "bear"
     return "neutral"
+
+async def mark_status(symbol: str, code: str, detail: str = ""):
+    async with _stats_lock:
+        scan_status[symbol] = {'code': code, 'detail': detail}
+
+async def record_crit_batch(items):
+    async with _stats_lock:
+        for name, passed in items:
+            crit_total_counts[name] += 1
+            if not passed:
+                crit_false_counts[name] += 1
 
 # ================== Mesaj Kuyruğu ==================
 async def enqueue_message(text: str):
@@ -649,12 +650,12 @@ def fake_filter_v2(df: pd.DataFrame, side: str) -> (bool, str):
 async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
     try:
-        # Yeni sembol cooldown kontrolü
+        await mark_status(symbol, "started")
         now = datetime.now(tz)
         until = new_symbol_until.get(symbol)
         if until and now < until:
+            await mark_status(symbol, "cooldown", "new_symbol_cooldown")
             return
-        # Veri
         if TEST_MODE:
             closes = np.abs(np.cumsum(np.random.randn(200))) * 0.05 + 0.3
             highs = closes + np.random.rand(200) * 0.02 * closes
@@ -669,19 +670,19 @@ async def check_signals(symbol, timeframe='4h'):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             if df is None or df.empty or len(df) < MIN_BARS:
                 new_symbol_until[symbol] = now + timedelta(minutes=NEW_SYMBOL_COOLDOWN_MIN)
+                await mark_status(symbol, "min_bars", f"bars={len(df) if df is not None else 0}")
                 logger.info(f"{symbol}: Yetersiz veri ({len(df) if df is not None else 0} mum), cooldown.")
                 return
-        # İndikatörler
         calc = calculate_indicators(df, symbol, timeframe)
         if not calc or calc[0] is None:
+            await mark_status(symbol, "skip", "indicators_failed")
             return
         df, smi_squeeze_off, smi_histogram, smi_color, adx_condition, di_condition_long, di_condition_short = calc
-        # ATR
         atr_value, avg_atr_ratio = get_atr_values(df, LOOKBACK_ATR)
         if not np.isfinite(atr_value) or not np.isfinite(avg_atr_ratio):
+            await mark_status(symbol, "skip", "invalid_atr")
             logger.warning(f"Geçersiz ATR ({symbol} {timeframe}), skip.")
             return
-        # SMI Light
         smi_raw = smi_histogram
         atr_for_norm = max(atr_value, 1e-9)
         smi_norm = (smi_raw / atr_for_norm) if np.isfinite(smi_raw) else np.nan
@@ -709,7 +710,6 @@ async def check_signals(symbol, timeframe='4h'):
             slope_ok_long = slope_ok_short = True
         smi_condition_long = base_long and slope_ok_long
         smi_condition_short = base_short and slope_ok_short
-        # ADX ve NTX
         adx_ok = adx_condition
         rising_adx = adx_rising(df)
         atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
@@ -738,25 +738,21 @@ async def check_signals(symbol, timeframe='4h'):
             logger.info(f"{symbol} {timeframe} NTX_last:{ntx_last:.2f} thr:{ntx_thr:.2f} ntx_ok:{ntx_ok} ntx_rising_str:{ntx_rising_str} rising_long:{rising_long} rising_short:{rising_short}")
         trend_strong_long = dir_long_ok and rising_long
         trend_strong_short = dir_short_ok and rising_short
-        # FakeFilter v2
         fk_ok_L, fk_dbg_L = fake_filter_v2(df, side="long")
         fk_ok_S, fk_dbg_S = fake_filter_v2(df, side="short")
         if VERBOSE_LOG:
             logger.info(f"{symbol} {timeframe} FK_LONG {fk_ok_L} | {fk_dbg_L}")
             logger.info(f"{symbol} {timeframe} FK_SHORT {fk_ok_S} | {fk_dbg_S}")
-        # Froth
         base_K = FROTH_GUARD_K_ATR
         K_long = min(base_K * 1.2, 1.3) if trend_strong_long else base_K
         K_short = min(base_K * 1.2, 1.3) if trend_strong_short else base_K
         ema_gap = abs(float(df['close'].iloc[-2]) - float(df['ema10'].iloc[-2]))
         froth_ok_long = (ema_gap <= K_long * atr_value) or trend_strong_long
         froth_ok_short = (ema_gap <= K_short * atr_value) or trend_strong_short
-        # Mum rengi
         closed_candle = df.iloc[-2]
         current_price = float(df['close'].iloc[-1]) if pd.notna(df['close'].iloc[-1]) else np.nan
         is_green = pd.notna(closed_candle['close']) and pd.notna(closed_candle['open']) and (closed_candle['close'] > closed_candle['open'])
         is_red = pd.notna(closed_candle['close']) and pd.notna(closed_candle['open']) and (closed_candle['close'] < closed_candle['open'])
-        # EMA Tetik
         e10 = df['ema10']
         e30 = df['ema30']
         e90 = df['ema90']
@@ -801,7 +797,6 @@ async def check_signals(symbol, timeframe='4h'):
         retest_after_flip_S = (bars_since_retest_S <= state_bars_flip)
         late_long_ok = (regime_long and state_bars_flip >= LATE_WAIT_BARS and not retest_after_flip_L)
         late_short_ok = (regime_short and state_bars_flip >= LATE_WAIT_BARS and not retest_after_flip_S)
-        # Tetikleyiciler
         buy_early = (
             (state_bars_flip <= LATE_WAIT_BARS)
             and retest_confirm_ok_L
@@ -854,7 +849,6 @@ async def check_signals(symbol, timeframe='4h'):
         )
         buy_condition_ema = buy_early or buy_1030 or buy_late
         sell_condition_ema = sell_early or sell_1030 or sell_late
-        # Debounce
         adx_last = df['adx'].iloc[-2]
         ntx_rise_long = (ntx_rising_str or ntx_rising_hyb_long)
         ntx_rise_short = (ntx_rising_str or ntx_rising_hyb_short)
@@ -866,13 +860,30 @@ async def check_signals(symbol, timeframe='4h'):
         debounce_ok_short = not (reg_dir == 'short' and bars_flip < req_short)
         buy_condition = buy_condition_ema and str_ok and debounce_ok_long
         sell_condition = sell_condition_ema and str_ok and debounce_ok_short
-        # Flip sonrası ekstra filtre
         if EARLY_EXTRA_FILTER:
             if reg_dir == 'long' and not debounce_ok_long:
                 buy_condition = buy_condition and retest_long and di_long
             if reg_dir == 'short' and not debounce_ok_short:
                 sell_condition = sell_condition and retest_short and di_short
-        # Sebep
+        criteria = [
+            ("smi_long", smi_condition_long),
+            ("smi_short", smi_condition_short),
+            ("dir_long_ok", dir_long_ok),
+            ("dir_short_ok", dir_short_ok),
+            ("fk_long", fk_ok_L),
+            ("fk_short", fk_ok_S),
+            ("froth_long", froth_ok_long),
+            ("froth_short", froth_ok_short),
+            ("debounce_long", debounce_ok_long),
+            ("debounce_short", debounce_ok_short),
+            ("confirm1030_long", confirm_1030_L),
+            ("confirm1030_short", confirm_1030_S),
+            ("retest_ok_long", retest_confirm_ok_L),
+            ("retest_ok_short", retest_confirm_ok_S),
+            ("adx_ok", adx_ok),
+            ("ntx_ok", ntx_ok),
+        ]
+        await record_crit_batch(criteria)
         if buy_condition:
             reason = "Erken (Retest)" if buy_early else "10/30 Onay" if buy_1030 else "Geç (Retestsiz)"
         elif sell_condition:
@@ -883,10 +894,10 @@ async def check_signals(symbol, timeframe='4h'):
             logger.info(f"{symbol} {timeframe} buy_early:{buy_early} buy_1030:{buy_1030} buy_late:{buy_late} sell_early:{sell_early} sell_1030:{sell_1030} sell_late:{sell_late}")
             logger.info(f"{symbol} {timeframe} buy:{buy_condition} sell:{sell_condition}")
         if buy_condition and sell_condition:
+            await mark_status(symbol, "skip", "conflicting_signals")
             logger.warning(f"{symbol} {timeframe}: Çakışan sinyaller, işlem yapılmadı.")
             return
         now = datetime.now(tz)
-        # Rejim güncelle
         bar_time = df.index[-2]
         if not isinstance(bar_time, (pd.Timestamp, datetime)):
             bar_time = pd.to_datetime(bar_time, errors="ignore")
@@ -900,7 +911,6 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['bars_since_flip'] = min(9999, int(current_pos.get('bars_since_flip', 9999)) + 1)
             current_pos['regime_dir'] = regime_now
             current_pos['last_regime_bar'] = bar_time
-        # Çıkış koşulları
         e10_prev, e30_prev, e90_prev = df['ema10'].iloc[-3], df['ema30'].iloc[-3], df['ema90'].iloc[-3]
         e10_last, e30_last, e90_last = df['ema10'].iloc[-2], df['ema30'].iloc[-2], df['ema90'].iloc[-2]
         exit_cross_long = (pd.notna(e10_prev) and pd.notna(e30_prev) and pd.notna(e10_last) and pd.notna(e30_last)
@@ -909,7 +919,6 @@ async def check_signals(symbol, timeframe='4h'):
                             and (e10_prev <= e30_prev) and (e10_last > e30_last))
         regime_break_long = e30_last < e90_last
         regime_break_short = e30_last > e90_last
-        # Reversal kapama
         if (buy_condition or sell_condition) and (current_pos['signal'] is not None):
             new_signal = 'buy' if buy_condition else 'sell'
             if current_pos['signal'] != new_signal:
@@ -932,7 +941,6 @@ async def check_signals(symbol, timeframe='4h'):
                 }
                 save_state()
                 current_pos = signal_cache[key]
-        # BUY pozisyon aç
         if buy_condition and current_pos['signal'] != 'buy':
             cooldown_active = (
                 current_pos['last_signal_time'] and
@@ -942,17 +950,20 @@ async def check_signals(symbol, timeframe='4h'):
             if cooldown_active or current_pos.get('last_bar_time') == bar_time:
                 if VERBOSE_LOG:
                     logger.info(f"{symbol} {timeframe}: BUY atlandı (cooldown veya aynı bar) 🚫")
+                await mark_status(symbol, "skip", "cooldown_or_same_bar")
             else:
                 entry_price = float(closed_candle['close']) if pd.notna(closed_candle['close']) else np.nan
                 eff_sl_mult = SL_MULTIPLIER + SL_BUFFER
                 sl_atr_abs = eff_sl_mult * atr_value
                 sl_price = entry_price - sl_atr_abs
                 if not np.isfinite(entry_price) or not np.isfinite(sl_price):
+                    await mark_status(symbol, "skip", "invalid_entry_sl")
                     logger.warning(f"Geçersiz giriş/SL fiyatı ({symbol} {timeframe}), skip.")
                     return
                 if current_price <= sl_price + INSTANT_SL_BUFFER * atr_value:
                     if VERBOSE_LOG:
                         logger.info(f"{symbol} {timeframe}: BUY atlandı (anında SL riski) 🚫")
+                    await mark_status(symbol, "skip", "instant_sl_risk")
                 else:
                     tp1_price = entry_price + (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price + (TP_MULTIPLIER2 * atr_value)
@@ -974,7 +985,6 @@ async def check_signals(symbol, timeframe='4h'):
                         f"TP2: {fmt_sym(symbol, tp2_price)}",
                     ]))
                     save_state()
-        # SELL pozisyon aç
         elif sell_condition and current_pos['signal'] != 'sell':
             cooldown_active = (
                 current_pos['last_signal_time'] and
@@ -984,17 +994,20 @@ async def check_signals(symbol, timeframe='4h'):
             if cooldown_active or current_pos.get('last_bar_time') == bar_time:
                 if VERBOSE_LOG:
                     logger.info(f"{symbol} {timeframe}: SELL atlandı (cooldown veya aynı bar) 🚫")
+                await mark_status(symbol, "skip", "cooldown_or_same_bar")
             else:
                 entry_price = float(closed_candle['close']) if pd.notna(closed_candle['close']) else np.nan
                 eff_sl_mult = SL_MULTIPLIER + SL_BUFFER
                 sl_atr_abs = eff_sl_mult * atr_value
                 sl_price = entry_price + sl_atr_abs
                 if not np.isfinite(entry_price) or not np.isfinite(sl_price):
+                    await mark_status(symbol, "skip", "invalid_entry_sl")
                     logger.warning(f"Geçersiz giriş/SL fiyatı ({symbol} {timeframe}), skip.")
                     return
                 if current_price >= sl_price - INSTANT_SL_BUFFER * atr_value:
                     if VERBOSE_LOG:
                         logger.info(f"{symbol} {timeframe}: SELL atlandı (anında SL riski) 🚫")
+                    await mark_status(symbol, "skip", "instant_sl_risk")
                 else:
                     tp1_price = entry_price - (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price - (TP_MULTIPLIER2 * atr_value)
@@ -1016,7 +1029,6 @@ async def check_signals(symbol, timeframe='4h'):
                         f"TP2: {fmt_sym(symbol, tp2_price)}",
                     ]))
                     save_state()
-        # Pozisyon yönetimi (LONG)
         if current_pos['signal'] == 'buy':
             if current_pos['highest_price'] is None or current_price > current_pos['highest_price']:
                 current_pos['highest_price'] = current_price
@@ -1082,7 +1094,6 @@ async def check_signals(symbol, timeframe='4h'):
                 save_state()
                 return
             signal_cache[key] = current_pos
-        # Pozisyon yönetimi (SHORT)
         elif current_pos['signal'] == 'sell':
             if current_pos['lowest_price'] is None or current_price < current_pos['lowest_price']:
                 current_pos['lowest_price'] = current_price
@@ -1148,16 +1159,18 @@ async def check_signals(symbol, timeframe='4h'):
                 save_state()
                 return
             signal_cache[key] = current_pos
-        # Telemetri
         blocked_by_froth = 0 if froth_ok_long else 1
         passed_because_strong = 1 if trend_strong_long and not froth_ok_long else 0
         if VERBOSE_LOG:
             logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} passed_because_strong:{passed_because_strong}")
+        await mark_status(symbol, "ok")
     except ccxt.NetworkError as e:
+        await mark_status(symbol, "error", f"network:{str(e)[:120]}")
         logger.exception(f"Ağ hatası ({symbol} {timeframe}): {str(e)}, 10s bekle")
         await asyncio.sleep(10)
         return
     except Exception as e:
+        await mark_status(symbol, "error", f"exception:{str(e)[:120]}")
         logger.exception(f"Hata ({symbol} {timeframe}): {str(e)}")
         return
 
@@ -1175,8 +1188,13 @@ async def main():
     if not symbols:
         raise RuntimeError("Uygun sembol bulunamadı. Permissions/region?")
     logger.info(f"Toplam sembol: {len(symbols)} | N_SHARDS={N_SHARDS} | BATCH_SIZE={BATCH_SIZE}")
+    loop_count = 0
     while True:
         loop_start = time.time()
+        async with _stats_lock:
+            scan_status.clear()
+            crit_false_counts.clear()
+            crit_total_counts.clear()
         total_scanned = 0
         for shard_index in range(N_SHARDS):
             shard_symbols = [s for i, s in enumerate(symbols) if (i % N_SHARDS) == shard_index]
@@ -1188,7 +1206,39 @@ async def main():
                 await asyncio.sleep(INTER_BATCH_SLEEP + random.random()*0.5)
         elapsed = time.time() - loop_start
         sleep_sec = max(0.0, 120.0 - elapsed)
-        logger.info(f"Tur bitti, {total_scanned} sembol tarandı, {elapsed:.1f}s sürdü, {sleep_sec:.1f}s bekle...")
+        async with _stats_lock:
+            codes = Counter(v['code'] for v in scan_status.values())
+            total = len(symbols)
+            missing = [s for s in symbols if s not in scan_status]
+            top3_false = crit_false_counts.most_common(3)
+        logger.info(
+            "Coverage: total=%d | ok=%d | cooldown=%d | min_bars=%d | skip=%d | error=%d | missing=%d",
+            total,
+            codes.get('ok', 0),
+            codes.get('cooldown', 0),
+            codes.get('min_bars', 0),
+            codes.get('skip', 0),
+            codes.get('error', 0),
+            len(missing)
+        )
+        if missing:
+            logger.warning("Missing (ilk 15): %s", ", ".join(missing[:15]))
+        if top3_false:
+            logger.info("Top-3 FALSE kriter: %s", ", ".join(f"{k}={c}" for k, c in top3_false))
+        logger.info(
+            "Tur bitti | total=%d | ok=%d | cooldown=%d | min_bars=%d | skip=%d | error=%d | elapsed=%.1fs | bekle=%.1fs",
+            total, codes.get('ok',0), codes.get('cooldown',0), codes.get('min_bars',0),
+            codes.get('skip',0), codes.get('error',0), elapsed, sleep_sec
+        )
+        loop_count += 1
+        if loop_count % 5 == 0:
+            await enqueue_message(
+                f"Heartbeat: ok={codes.get('ok',0)}/{total}, "
+                f"cooldown={codes.get('cooldown',0)}, "
+                f"min_bars={codes.get('min_bars',0)}, "
+                f"error={codes.get('error',0)}, "
+                f"missing={len(missing)}"
+            )
         await asyncio.sleep(sleep_sec)
         save_state()
 
