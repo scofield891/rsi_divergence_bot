@@ -159,7 +159,7 @@ def configure_exchange_session(exchange, pool=50):
         pool_maxsize=pool,
         max_retries=Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
     )
-    s.mount('https://',```python
+    s.mount('https://', adapter)
 import ccxt
 import numpy as np
 import pandas as pd
