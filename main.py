@@ -24,167 +24,6 @@ if not BOT_TOKEN or not CHAT_ID:
     raise RuntimeError("BOT_TOKEN ve CHAT_ID ortam değişkenlerini ayarla.")
 TEST_MODE = False
 VERBOSE_LOG = False
-
-# ---- Sinyal / Risk Parametreleri ----
-LOOKBACK_ATR = 18
-SL_MULTIPLIER = 1.8
-TP_MULTIPLIER1 = 2.0
-TP_MULTIPLIER2 = 3.5
-SL_BUFFER = 0.3
-COOLDOWN_MINUTES = 60
-INSTANT_SL_BUFFER = 0.05
-LOOKBACK_SMI = 20
-ADX_PERIOD = 14
-ADX_THRESHOLD = 15
-ADX_NORMAL_HIGH = 21
-APPLY_COOLDOWN_BOTH_DIRECTIONS = True
-
-# Retest sonrası onay ve 10/30 onay pencereleri
-RETEST_CONFIRM_BARS = 5
-LATE_WAIT_BARS = 15
-CROSS_1030_CONFIRM_BARS = 5
-
-# ==== SMI Light ====
-SMI_LIGHT_NORM_MAX = 0.75
-SMI_LIGHT_ADAPTIVE = True
-SMI_LIGHT_PCTL = 0.65
-SMI_LIGHT_MAX_MIN = 0.60
-SMI_LIGHT_MAX_MAX = 1.10
-SMI_LIGHT_REQUIRE_SQUEEZE = False
-USE_SMI_SLOPE_CONFIRM = True
-USE_FROTH_GUARD = True
-FROTH_GUARD_K_ATR = 1.1
-
-# === ADX sinyal modu ===
-SIGNAL_MODE = "2of3"
-REQUIRE_DIRECTION = False
-
-# ---- Rate-limit & tarama pacing ----
-MAX_CONCURRENT_FETCHES = 4
-RATE_LIMIT_MS = 200
-N_SHARDS = 5
-BATCH_SIZE = 10
-INTER_BATCH_SLEEP = 5.0
-
-# ---- Sembol keşif ----
-LINEAR_ONLY = True
-QUOTE_WHITELIST = ("USDT",)
-
-# ==== Basit Hacim + FakeFilter v2 ====
-VOL_WIN = 60
-VOL_Q = 0.60
-VOL_MA_RATIO_MIN = 1.10
-VOL_Z_MIN = 1.5
-FF_BODY_MIN = 0.55
-FF_UPWICK_MAX = 0.25
-FF_DNWICK_MAX = 0.25
-FF_BB_MIN = 0.30
-
-# OBV eğimi penceresi (FakeFilter v2 için lazım)
-OBV_SLOPE_WIN = 5
-
-# ==== NTX ====
-NTX_PERIOD = 14
-NTX_K_EFF = 10
-NTX_VOL_WIN = 60
-NTX_THR_LO, NTX_THR_HI = 52.0, 60.0
-NTX_ATRZ_LO, NTX_ATRZ_HI = -1.0, 1.5
-NTX_MIN_FOR_HYBRID = 50.0
-NTX_RISE_K_STRICT = 5
-NTX_RISE_MIN_NET = 1.0
-NTX_RISE_POS_RATIO = 0.6
-NTX_RISE_EPS = 0.05
-NTX_RISE_K_HYBRID = 3
-NTX_FROTH_K = 1.0
-
-# ==== EMA 10/30/90 Parametreleri ====
-EMA_FAST = 10
-EMA_MID = 30
-EMA_SLOW = 90
-SLOPE_WINDOW = 5
-CONFIRM_K_ATR = 0.20
-RETEST_K_ATR = 0.30
-D_K_ATR = 0.10
-USE_STACK_ONLY = False
-USE_STACK_FRESH = True
-
-# ==== Debounce ayarları ====
-DEB_WEAK = 3
-DEB_MED = 2
-DEB_STR = 1
-ADX_SOFT = 28
-ADX_HARD = 35
-REQUIRE_RISING_FOR_SOFT = True
-REQUIRE_DI_FOR_HARD = True
-REQUIRE_NTX_FOR_HARD = True
-EARLY_EXTRA_FILTER = True
-
-def _risk_label(score: float) -> str:
-    if score < 20: return "Çok düşük risk 🟢"
-    if score < 40: return "Düşük risk 🟢"
-    if score < 60: return "Orta risk ⚠️"
-    if score < 80: return "Yüksek risk 🟠"
-    return "Aşırı risk 🔴"
-
-# ================== Logging ==================
-logger = logging.getLogger()
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    file_handler = RotatingFileHandler('bot.log', maxBytes=5_000_000, backupCount=3)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-logging.getLogger('telegram').setLevel(logging.ERROR)
-logging.getLogger('httpx').setLevel(logging.ERROR)
-
-# ================== Borsa & Bot ==================
-exchange = ccxt.bybit({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'linear'},
-    'timeout': 60000
-})
-MARKETS = {}
-
-async def load_markets():
-    global MARKETS
-    MARKETS = await asyncio.to_thread(exchange.load_markets)
-
-def configure_exchange_session(exchange, pool=50):
-    s = requests.Session()
-    adapter = HTTPAdapter(
-        pool_connections=pool,
-        pool_maxsize=pool,
-        max_retries=Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
-    )
-    s.mount('https://', adapter)
-import ccxt
-import numpy as np
-import pandas as pd
-import telegram
-import logging
-import asyncio
-from datetime import datetime, timedelta
-import time
-import pytz
-import sys
-import os
-import random
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from logging.handlers import RotatingFileHandler
-import json
-# ================== Sabit Değerler ==================
-# Güvenlik: ENV zorunlu
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-if not BOT_TOKEN or not CHAT_ID:
-    raise RuntimeError("BOT_TOKEN ve CHAT_ID ortam değişkenlerini ayarla.")
-TEST_MODE = False
-VERBOSE_LOG = False
 # ---- Sinyal / Risk Parametreleri ----
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8
@@ -268,12 +107,14 @@ REQUIRE_RISING_FOR_SOFT = True
 REQUIRE_DI_FOR_HARD = True
 REQUIRE_NTX_FOR_HARD = True
 EARLY_EXTRA_FILTER = True
+
 def _risk_label(score: float) -> str:
     if score < 20: return "Çok düşük risk 🟢"
     if score < 40: return "Düşük risk 🟢"
     if score < 60: return "Orta risk ⚠️"
     if score < 80: return "Yüksek risk 🟠"
     return "Aşırı risk 🔴"
+
 # ================== Logging ==================
 logger = logging.getLogger()
 if not logger.handlers:
@@ -287,6 +128,7 @@ if not logger.handlers:
     logger.addHandler(file_handler)
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
+
 # ================== Borsa & Bot ==================
 exchange = ccxt.bybit({
     'enableRateLimit': True,
@@ -294,9 +136,11 @@ exchange = ccxt.bybit({
     'timeout': 60000
 })
 MARKETS = {}
+
 async def load_markets():
     global MARKETS
     MARKETS = await asyncio.to_thread(exchange.load_markets)
+
 def configure_exchange_session(exchange, pool=50):
     s = requests.Session()
     adapter = HTTPAdapter(
@@ -307,11 +151,13 @@ def configure_exchange_session(exchange, pool=50):
     s.mount('https://', adapter)
     s.mount('http://', adapter)
     exchange.session = s
+
 configure_exchange_session(exchange, pool=50)
 telegram_bot = telegram.Bot(
     token=BOT_TOKEN,
     request=telegram.request.HTTPXRequest(connection_pool_size=20, pool_timeout=30.0)
 )
+
 # ================== Global State ==================
 signal_cache = {}
 message_queue = asyncio.Queue(maxsize=1000)
@@ -320,10 +166,12 @@ _rate_lock = asyncio.Lock()
 _last_call_ts = 0.0
 STATE_FILE = 'positions.json'
 DT_KEYS = {"last_signal_time", "entry_time", "last_bar_time", "last_regime_bar"}
+
 def _json_default(o):
     if isinstance(o, datetime):
         return o.isoformat()
     return str(o)
+
 def _parse_dt(val):
     if isinstance(val, str):
         try:
@@ -331,6 +179,7 @@ def _parse_dt(val):
         except Exception:
             return val
     return val
+
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -346,43 +195,60 @@ def load_state():
             logger.warning(f"State yüklenemedi: {e}")
             return {}
     return {}
+
 def save_state():
     try:
         with open(STATE_FILE, 'w') as f:
             json.dump(signal_cache, f, default=_json_default)
     except Exception as e:
         logger.warning(f"State kaydedilemedi: {e}")
+
 signal_cache = load_state()
+
 # ================== Util ==================
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
+
 def pct_rank(series: pd.Series, value: float) -> float:
     s = series.dropna()
     if not np.isfinite(value) or s.empty:
         return 0.0
     return float((s < value).mean())
+
 def rolling_z(series: pd.Series, win: int) -> float:
     s = series.tail(win).astype(float)
     if s.size < 5 or s.std(ddof=0) == 0 or not np.isfinite(s.iloc[-1]):
         return 0.0
     return float((s.iloc[-1] - s.mean()) / (s.std(ddof=0) + 1e-12))
+
 def fmt_sym(symbol, x):
     try:
         prec = MARKETS.get(symbol, {}).get('precision', {}).get('price', 5)
         return f"{float(x):.{prec}f}"
     except Exception:
         return str(x)
+
 def _bars_since_last_true(mask: pd.Series) -> int:
     """Mask'teki son True'dan beri kaç bar geçtiğini hesapla (ters indexle)"""
     s = mask.replace(False, np.nan).iloc[::-1]
     first_true = s.first_valid_index()
     return len(s) if first_true is None else s.index.get_loc(first_true)
+
+def get_regime(df: pd.DataFrame, use_adx=True, adx_th=ADX_SOFT) -> str:
+    e30, e90, adx_last = df['ema30'].iloc[-2], df['ema90'].iloc[-2], df['adx'].iloc[-2]
+    if use_adx and not pd.isna(adx_last) and adx_last < adx_th:
+        return "neutral"
+    if e30 > e90: return "bull"
+    if e30 < e90: return "bear"
+    return "neutral"
+
 # ================== Mesaj Kuyruğu ==================
 async def enqueue_message(text: str):
     try:
         message_queue.put_nowait(text)
     except asyncio.QueueFull:
         logger.warning("Mesaj kuyruğu dolu, mesaj düşürüldü.")
+
 async def message_sender():
     while True:
         message = await message_queue.get()
@@ -397,6 +263,7 @@ async def message_sender():
         except Exception as e:
             logger.error(f"Telegram mesaj hatası: {str(e)}")
         message_queue.task_done()
+
 # ================== Rate-limit Dostu Fetch ==================
 async def fetch_ohlcv_async(symbol, timeframe, limit):
     global _last_call_ts
@@ -419,6 +286,7 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
             logger.warning(f"Network/Timeout {symbol} {timeframe}, retry in {backoff:.1f}s ({e.__class__.__name__})")
             await asyncio.sleep(backoff)
     raise ccxt.NetworkError(f"fetch_ohlcv failed after retries: {symbol} {timeframe}")
+
 # ================== Sembol Keşfi ==================
 async def discover_bybit_symbols(linear_only=True, quote_whitelist=("USDT",)):
     markets = await asyncio.to_thread(exchange.load_markets)
@@ -432,6 +300,7 @@ async def discover_bybit_symbols(linear_only=True, quote_whitelist=("USDT",)):
     syms = sorted(set(syms))
     logger.info(f"Keşfedilen sembol sayısı: {len(syms)} (linear={linear_only}, quotes={quote_whitelist})")
     return syms
+
 # ================== İndikatör Fonksiyonları ==================
 def calculate_ema(closes, span):
     k = 2 / (span + 1)
@@ -440,6 +309,7 @@ def calculate_ema(closes, span):
     for i in range(1, len(closes)):
         ema[i] = (closes[i] * k) + (ema[i-1] * (1 - k))
     return ema
+
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return np.zeros(len(closes), dtype=np.float64)
@@ -459,6 +329,7 @@ def calculate_rsi(closes, period=14):
         rs = (up / down) if down != 0 else (float('inf') if up > 0 else 0)
         rsi[i] = 100. - 100. / (1. + rs) if rs != float('inf') else 100.
     return rsi
+
 def calculate_adx(df, symbol, period=ADX_PERIOD):
     df['high_diff'] = df['high'] - df['high'].shift(1)
     df['low_diff'] = df['low'].shift(1) - df['low']
@@ -478,14 +349,17 @@ def calculate_adx(df, symbol, period=ADX_PERIOD):
     adx_condition = df['adx'].iloc[-2] >= ADX_THRESHOLD if pd.notna(df['adx'].iloc[-2]) else False
     di_condition_long = df['di_plus'].iloc[-2] > df['di_minus'].iloc[-2] if pd.notna(df['di_plus'].iloc[-2]) and pd.notna(df['di_minus'].iloc[-2]) else False
     di_condition_short = df['di_plus'].iloc[-2] < df['di_minus'].iloc[-2] if pd.notna(df['di_plus'].iloc[-2]) and pd.notna(df['di_minus'].iloc[-2]) else False
-    logger.info(f"ADX calculated: {df['adx'].iloc[-2]:.2f} for {symbol} at {df.index[-2]}")
+    if VERBOSE_LOG:
+        logger.info(f"ADX calculated: {df['adx'].iloc[-2]:.2f} for {symbol} at {df.index[-2]}")
     return df, adx_condition, di_condition_long, di_condition_short
+
 def calculate_bb(df, period=20, mult=2.0):
     df['bb_mid'] = df['close'].rolling(period).mean()
     df['bb_std'] = df['close'].rolling(period).std()
     df['bb_upper'] = df['bb_mid'] + mult * df['bb_std']
     df['bb_lower'] = df['bb_mid'] - mult * df['bb_std']
     return df
+
 def calculate_kc(df, period=20, atr_period=20, mult=1.5):
     df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period))
     high_low = df['high'] - df['low']
@@ -496,10 +370,12 @@ def calculate_kc(df, period=20, atr_period=20, mult=1.5):
     df['kc_upper'] = df['kc_mid'] + mult * df['atr_kc']
     df['kc_lower'] = df['kc_mid'] - mult * df['atr_kc']
     return df
+
 def calculate_squeeze(df):
     df['squeeze_on'] = (df['bb_lower'] > df['kc_lower']) & (df['bb_upper'] < df['kc_upper'])
     df['squeeze_off'] = (df['bb_lower'] < df['kc_lower']) & (df['bb_upper'] > df['kc_upper'])
     return df
+
 def calculate_smi_momentum(df, length=LOOKBACK_SMI):
     highest = df['high'].rolling(length).max()
     lowest = df['low'].rolling(length).min()
@@ -519,6 +395,7 @@ def calculate_smi_momentum(df, length=LOOKBACK_SMI):
         smi.iloc[i] = slope * (length - 1) + intercept
     df['smi'] = smi
     return df
+
 def ensure_atr(df, period=14):
     if 'atr' in df.columns:
         return df
@@ -528,6 +405,7 @@ def ensure_atr(df, period=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.rolling(window=period).mean()
     return df
+
 def calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60):
     close = df['close'].values
     vol = df['volume'].values
@@ -549,6 +427,7 @@ def calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60):
     denom = (1.4826 * df['vol_mad']).replace(0, np.nan)
     df['vol_z'] = (vol_s - df['vol_med']) / denom
     return df
+
 def get_atr_values(df, lookback_atr=LOOKBACK_ATR):
     df = ensure_atr(df, period=14)
     if len(df) < lookback_atr + 2:
@@ -560,6 +439,7 @@ def get_atr_values(df, lookback_atr=LOOKBACK_ATR):
     atr_value = float(df['atr'].iloc[-2]) if pd.notna(df['atr'].iloc[-2]) else np.nan
     avg_atr_ratio = float(atr_series.mean() / close_last)
     return atr_value, avg_atr_ratio
+
 def calculate_indicators(df, symbol, timeframe):
     if len(df) < 80:
         logger.warning(f"DF çok kısa ({len(df)}), indikatör hesaplanamadı.")
@@ -581,12 +461,14 @@ def calculate_indicators(df, symbol, timeframe):
     df = calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60)
     df = calc_ntx(df, period=NTX_PERIOD, k_eff=NTX_K_EFF)
     return df, df['squeeze_off'].iloc[-2], df['smi'].iloc[-2], 'green' if df['smi'].iloc[-2] > 0 else 'red' if df['smi'].iloc[-2] < 0 else 'gray', adx_condition, di_condition_long, di_condition_short
+
 # ========= ADX Rising =========
 ADX_RISE_K = 5
 ADX_RISE_MIN_NET = 1.0
 ADX_RISE_POS_RATIO = 0.6
 ADX_RISE_EPS = 0.0
 ADX_RISE_USE_HYBRID = True
+
 def adx_rising_strict(df_adx: pd.Series) -> bool:
     if df_adx is None or len(df_adx) < ADX_RISE_K + 1:
         return False
@@ -599,6 +481,7 @@ def adx_rising_strict(df_adx: pd.Series) -> bool:
     pos_ratio = (diffs > ADX_RISE_EPS).mean() if diffs.size > 0 else 0.0
     net = window.iloc[-1] - window.iloc[0]
     return (slope > 0) and (net >= ADX_RISE_MIN_NET) and (pos_ratio >= ADX_RISE_POS_RATIO)
+
 def adx_rising_hybrid(df_adx: pd.Series) -> bool:
     if not ADX_RISE_USE_HYBRID:
         return False
@@ -611,10 +494,12 @@ def adx_rising_hybrid(df_adx: pd.Series) -> bool:
     slope, _ = np.polyfit(x, window.values, 1)
     last_diff = window.values[-1] - window.values[-2]
     return (slope > 0) and (last_diff > ADX_RISE_EPS)
+
 def adx_rising(df: pd.DataFrame) -> bool:
     if 'adx' not in df.columns:
         return False
     return adx_rising_strict(df['adx']) or adx_rising_hybrid(df['adx'])
+
 def _debounce_required(side: str, adx_last: float, rising: bool, di_align: bool, ntx_rise: bool) -> int:
     if adx_last >= ADX_HARD:
         hard_ok = True
@@ -632,6 +517,7 @@ def _debounce_required(side: str, adx_last: float, rising: bool, di_align: bool,
     if adx_last >= 20:
         return DEB_MED
     return DEB_WEAK
+
 # ==== NTX ====
 def calc_ntx(df: pd.DataFrame, period: int = NTX_PERIOD, k_eff: int = NTX_K_EFF) -> pd.DataFrame:
     close = df['close'].astype(float)
@@ -659,9 +545,11 @@ def calc_ntx(df: pd.DataFrame, period: int = NTX_PERIOD, k_eff: int = NTX_K_EFF)
     df['ntx_raw'] = base
     df['ntx'] = df['ntx_raw'].ewm(alpha=1.0/period, adjust=False).mean() * 100.0
     return df
+
 def ntx_threshold(atr_z: float) -> float:
     a = clamp((atr_z - NTX_ATRZ_LO) / (NTX_ATRZ_HI - NTX_ATRZ_LO + 1e-12), 0.0, 1.0)
     return NTX_THR_LO + a * (NTX_THR_HI - NTX_THR_LO)
+
 def ntx_rising_strict(s: pd.Series, k: int = NTX_RISE_K_STRICT, min_net: float = NTX_RISE_MIN_NET, pos_ratio_th: float = NTX_RISE_POS_RATIO, eps: float = NTX_RISE_EPS) -> bool:
     if s is None or len(s) < k + 1: return False
     w = s.iloc[-(k+1):-1].astype(float)
@@ -671,6 +559,7 @@ def ntx_rising_strict(s: pd.Series, k: int = NTX_RISE_K_STRICT, min_net: float =
     posr = (diffs > eps).mean() if diffs.size else 0.0
     net = w.iloc[-1] - w.iloc[0]
     return (slope > 0) and (net >= min_net) and (posr >= pos_ratio_th)
+
 def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE_EPS, min_ntx: float = NTX_MIN_FOR_HYBRID, k: int = NTX_RISE_K_HYBRID, froth_k: float = NTX_FROTH_K) -> bool:
     s = df['ntx'] if 'ntx' in df.columns else None
     if s is None or len(s) < k + 1: return False
@@ -688,6 +577,7 @@ def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE
     if abs(close_last - ema10_last) > froth_k * atr_value:
         return False
     return True
+
 # ================== Candle Body/Wicks (FakeFilter için) ==================
 def candle_body_wicks(row):
     o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
@@ -696,6 +586,7 @@ def candle_body_wicks(row):
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
     return body / rng, upper_wick / rng, lower_wick / rng
+
 # === FakeFilter v2 ===
 def _bb_prox(last, side="long"):
     if side == "long":
@@ -704,11 +595,13 @@ def _bb_prox(last, side="long"):
         num = float(last['bb_mid'] - last['close']); den = float(last['bb_mid'] - last['bb_lower'])
     if not (np.isfinite(num) and np.isfinite(den)) or den <= 0: return 0.0
     return clamp(num/den, 0.0, 1.0)
+
 def _obv_slope_recent(df: pd.DataFrame, win=OBV_SLOPE_WIN) -> float:
     s = df['obv'].iloc[-(win+1):-1].astype(float)
     if s.size < 3 or s.isna().any(): return 0.0
     x = np.arange(len(s)); m,_ = np.polyfit(x, s.values, 1)
     return float(m)
+
 def simple_volume_ok(df: pd.DataFrame, side: str) -> (bool, str):
     if len(df) < VOL_WIN + 2:
         return False, "data_short"
@@ -724,6 +617,7 @@ def simple_volume_ok(df: pd.DataFrame, side: str) -> (bool, str):
         return False, "vol_data_invalid"
     vol_ok = (vol_ratio >= VOL_MA_RATIO_MIN) and (vol_z >= VOL_Z_MIN)
     return vol_ok, f"dvol_usd={dvol_usd:.0f}, vol_ratio={vol_ratio:.2f}, vol_z={vol_z:.2f}, ref={dvol_ref:.0f}"
+
 def fake_filter_v2(df: pd.DataFrame, side: str) -> (bool, str):
     if len(df) < max(VOL_WIN + 2, OBV_SLOPE_WIN + 2):
         return False, "data_short"
@@ -744,6 +638,7 @@ def fake_filter_v2(df: pd.DataFrame, side: str) -> (bool, str):
              f"bb_prox={bb_prox:.2f} ({'OK' if bb_ok else 'FAIL'}), "
              f"obv_slope={obv_slope:.2f} ({'OK' if obv_ok else 'FAIL'}), {vol_reason}")
     return all_ok, debug
+
 # ================== Sinyal Döngüsü ==================
 async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
@@ -827,14 +722,16 @@ async def check_signals(symbol, timeframe='4h'):
         else:
             dir_long_ok, dir_short_ok = di_long, di_short
             str_ok = strength_ok
-        logger.info(f"{symbol} {timeframe} NTX_last:{ntx_last:.2f} thr:{ntx_thr:.2f} ntx_ok:{ntx_ok} ntx_rising_str:{ntx_rising_str} rising_long:{rising_long} rising_short:{rising_short}")
+        if VERBOSE_LOG:
+            logger.info(f"{symbol} {timeframe} NTX_last:{ntx_last:.2f} thr:{ntx_thr:.2f} ntx_ok:{ntx_ok} ntx_rising_str:{ntx_rising_str} rising_long:{rising_long} rising_short:{rising_short}")
         trend_strong_long = dir_long_ok and rising_long
         trend_strong_short = dir_short_ok and rising_short
         # FakeFilter v2
         fk_ok_L, fk_dbg_L = fake_filter_v2(df, side="long")
         fk_ok_S, fk_dbg_S = fake_filter_v2(df, side="short")
-        logger.info(f"{symbol} {timeframe} FK_LONG {fk_ok_L} | {fk_dbg_L}")
-        logger.info(f"{symbol} {timeframe} FK_SHORT {fk_ok_S} | {fk_dbg_S}")
+        if VERBOSE_LOG:
+            logger.info(f"{symbol} {timeframe} FK_LONG {fk_ok_L} | {fk_dbg_L}")
+            logger.info(f"{symbol} {timeframe} FK_SHORT {fk_ok_S} | {fk_dbg_S}")
         # Froth
         base_K = FROTH_GUARD_K_ATR
         K_long = min(base_K * 1.2, 1.3) if trend_strong_long else base_K
@@ -872,10 +769,10 @@ async def check_signals(symbol, timeframe='4h'):
         retest_long = abs(float(df['low'].iloc[-2]) - e30.iloc[-2]) <= RETEST_K_ATR * atr_value
         retest_short = abs(float(df['high'].iloc[-2]) - e30.iloc[-2]) <= RETEST_K_ATR * atr_value
         bars_since_retest_L = _bars_since_last_true(
-            (abs(df['low'] - df['ema30']) <= RETEST_K_ATR * df['atr']).replace(False, np.nan)
+            (abs(df['low'] - df['ema30']) <= RETEST_K_ATR * df['atr'])
         )
         bars_since_retest_S = _bars_since_last_true(
-            (abs(df['high'] - df['ema30']) <= RETEST_K_ATR * df['atr']).replace(False, np.nan)
+            (abs(df['high'] - df['ema30']) <= RETEST_K_ATR * df['atr'])
         )
         retest_confirm_ok_L = (bars_since_retest_L <= RETEST_CONFIRM_BARS) and retest_long
         retest_confirm_ok_S = (bars_since_retest_S <= RETEST_CONFIRM_BARS) and retest_short
@@ -970,8 +867,9 @@ async def check_signals(symbol, timeframe='4h'):
             reason = "Erken (Retest)" if sell_early else "10/30 Onay" if sell_1030 else "Geç (Retestsiz)"
         else:
             reason = ""
-        logger.info(f"{symbol} {timeframe} buy_early:{buy_early} buy_1030:{buy_1030} buy_late:{buy_late} sell_early:{sell_early} sell_1030:{sell_1030} sell_late:{sell_late}")
-        logger.info(f"{symbol} {timeframe} buy:{buy_condition} sell:{sell_condition}")
+        if VERBOSE_LOG:
+            logger.info(f"{symbol} {timeframe} buy_early:{buy_early} buy_1030:{buy_1030} buy_late:{buy_late} sell_early:{sell_early} sell_1030:{sell_1030} sell_late:{sell_late}")
+            logger.info(f"{symbol} {timeframe} buy:{buy_condition} sell:{sell_condition}")
         if buy_condition and sell_condition:
             logger.warning(f"{symbol} {timeframe}: Çakışan sinyaller, işlem yapılmadı.")
             return
@@ -980,17 +878,15 @@ async def check_signals(symbol, timeframe='4h'):
         bar_time = df.index[-2]
         if not isinstance(bar_time, (pd.Timestamp, datetime)):
             bar_time = pd.to_datetime(bar_time, errors="ignore")
-        e90 = df['ema90']
-        slope_val_90 = (e90.iloc[-2] - e90.iloc[-(SLOPE_WINDOW+2)]) if len(e90) >= SLOPE_WINDOW+2 else 0.0
-        reg_now = 'long' if slope_val_90 > 0 else 'short' if slope_val_90 < 0 else current_pos.get('regime_dir')
+        regime_now = get_regime(df)
         if current_pos.get('last_regime_bar') != bar_time:
             if current_pos.get('regime_dir') is None:
                 current_pos['bars_since_flip'] = 9999
-            elif reg_now is not None and reg_now != current_pos.get('regime_dir'):
+            elif regime_now is not None and regime_now != current_pos.get('regime_dir'):
                 current_pos['bars_since_flip'] = 0
             else:
                 current_pos['bars_since_flip'] = min(9999, int(current_pos.get('bars_since_flip', 9999)) + 1)
-            current_pos['regime_dir'] = reg_now
+            current_pos['regime_dir'] = regime_now
             current_pos['last_regime_bar'] = bar_time
         # Çıkış koşulları
         e10_prev, e30_prev, e90_prev = df['ema10'].iloc[-3], df['ema30'].iloc[-3], df['ema90'].iloc[-3]
@@ -1055,14 +951,14 @@ async def check_signals(symbol, timeframe='4h'):
                         'regime_dir': current_pos.get('regime_dir'), 'bars_since_flip': current_pos.get('bars_since_flip', 9999), 'last_regime_bar': current_pos.get('last_regime_bar')
                     }
                     signal_cache[key] = current_pos
-                    await enqueue_message(
-                        f"{symbol} {timeframe}: BUY (LONG) 🚀\n"
-                        f"Sebep: EMA {reason}\n"
-                        f"Entry: {fmt_sym(symbol, entry_price)}\n"
-                        f"SL: {fmt_sym(symbol, sl_price)}\n"
-                        f"TP1: {fmt_sym(symbol, tp1_price)}\n"
-                        f"TP2: {fmt_sym(symbol, tp2_price)}"
-                    )
+                    await enqueue_message("\n".join([
+                        f"{symbol} {timeframe}: BUY (LONG) 🚀",
+                        f"Sebep: EMA {reason}",
+                        f"Entry: {fmt_sym(symbol, entry_price)}",
+                        f"SL: {fmt_sym(symbol, sl_price)}",
+                        f"TP1: {fmt_sym(symbol, tp1_price)}",
+                        f"TP2: {fmt_sym(symbol, tp2_price)}",
+                    ]))
                     save_state()
         # SELL pozisyon aç
         elif sell_condition and current_pos['signal'] != 'sell':
@@ -1095,14 +991,14 @@ async def check_signals(symbol, timeframe='4h'):
                         'regime_dir': current_pos.get('regime_dir'), 'bars_since_flip': current_pos.get('bars_since_flip', 9999), 'last_regime_bar': current_pos.get('last_regime_bar')
                     }
                     signal_cache[key] = current_pos
-                    await enqueue_message(
-                        f"{symbol} {timeframe}: SELL (SHORT) 📉\n"
-                        f"Sebep: EMA {reason}\n"
-                        f"Entry: {fmt_sym(symbol, entry_price)}\n"
-                        f"SL: {fmt_sym(symbol, sl_price)}\n"
-                        f"TP1: {fmt_sym(symbol, tp1_price)}\n"
-                        f"TP2: {fmt_sym(symbol, tp2_price)}"
-                    )
+                    await enqueue_message("\n".join([
+                        f"{symbol} {timeframe}: SELL (SHORT) 📉",
+                        f"Sebep: EMA {reason}",
+                        f"Entry: {fmt_sym(symbol, entry_price)}",
+                        f"SL: {fmt_sym(symbol, sl_price)}",
+                        f"TP1: {fmt_sym(symbol, tp1_price)}",
+                        f"TP2: {fmt_sym(symbol, tp2_price)}",
+                    ]))
                     save_state()
         # Pozisyon yönetimi (LONG)
         if current_pos['signal'] == 'buy':
@@ -1113,30 +1009,31 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['remaining_ratio'] -= 0.3
                 current_pos['sl_price'] = current_pos['entry_price']
                 current_pos['tp1_hit'] = True
-                await enqueue_message(
-                    f"{symbol} {timeframe}: TP1 Hit 🎯\n"
-                    f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}\n"
-                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, Stop girişe çekildi."
-                )
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: TP1 Hit 🎯",
+                    f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}",
+                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, Stop girişe çekildi.",
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
+                ]))
                 save_state()
             elif not current_pos['tp2_hit'] and current_price >= current_pos['tp2_price'] and current_pos['tp1_hit']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
-                current_pos['remaining_ratio'] -= 0.4
+                current_pos['remaining_ratio'] -= 0.3
                 current_pos['tp2_hit'] = True
-                await enqueue_message(
-                    f"{symbol} {timeframe}: TP2 Hit 🎯🎯\n"
-                    f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}\n"
-                    f"P/L: {profit_percent:+.2f}% | %40 kapandı, kalan %30 açık."
-                )
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: TP2 Hit 🎯🎯",
+                    f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}",
+                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, kalan %40 açık.",
+                ]))
                 save_state()
             if exit_cross_long or regime_break_long:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
-                await enqueue_message(
-                    f"{symbol} {timeframe}: EMA EXIT (LONG) 🔁\n"
-                    f"Price: {fmt_sym(symbol, current_price)}\n"
-                    f"P/L: {profit_percent:+.2f}%\n"
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: EMA EXIT (LONG) 🔁",
+                    f"Price: {fmt_sym(symbol, current_price)}",
+                    f"P/L: {profit_percent:+.2f}%",
                     f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
-                )
+                ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
                     'highest_price': None, 'lowest_price': None, 'avg_atr_ratio': None,
@@ -1148,12 +1045,12 @@ async def check_signals(symbol, timeframe='4h'):
                 return
             if current_price <= current_pos['sl_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
-                await enqueue_message(
-                    f"{symbol} {timeframe}: STOP LONG ⛔\n"
-                    f"Price: {fmt_sym(symbol, current_price)}\n"
-                    f"P/L: {profit_percent:+.2f}%\n"
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: STOP LONG ⛔",
+                    f"Price: {fmt_sym(symbol, current_price)}",
+                    f"P/L: {profit_percent:+.2f}%",
                     f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
-                )
+                ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
                     'highest_price': None, 'lowest_price': None, 'avg_atr_ratio': None,
@@ -1173,30 +1070,31 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['remaining_ratio'] -= 0.3
                 current_pos['sl_price'] = current_pos['entry_price']
                 current_pos['tp1_hit'] = True
-                await enqueue_message(
-                    f"{symbol} {timeframe}: TP1 Hit 🎯\n"
-                    f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}\n"
-                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, Stop girişe çekildi."
-                )
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: TP1 Hit 🎯",
+                    f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}",
+                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, Stop girişe çekildi.",
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
+                ]))
                 save_state()
             elif not current_pos['tp2_hit'] and current_price <= current_pos['tp2_price'] and current_pos['tp1_hit']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
-                current_pos['remaining_ratio'] -= 0.4
+                current_pos['remaining_ratio'] -= 0.3
                 current_pos['tp2_hit'] = True
-                await enqueue_message(
-                    f"{symbol} {timeframe}: TP2 Hit 🎯🎯\n"
-                    f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}\n"
-                    f"P/L: {profit_percent:+.2f}% | %40 kapandı, kalan %30 açık."
-                )
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: TP2 Hit 🎯🎯",
+                    f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}",
+                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, kalan %40 açık."
+                ]))
                 save_state()
             if exit_cross_short or regime_break_short:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
-                await enqueue_message(
-                    f"{symbol} {timeframe}: EMA EXIT (SHORT) 🔁\n"
-                    f"Price: {fmt_sym(symbol, current_price)}\n"
-                    f"P/L: {profit_percent:+.2f}%\n"
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: EMA EXIT (SHORT) 🔁",
+                    f"Price: {fmt_sym(symbol, current_price)}",
+                    f"P/L: {profit_percent:+.2f}%",
                     f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
-                )
+                ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
                     'highest_price': None, 'lowest_price': None, 'avg_atr_ratio': None,
@@ -1208,12 +1106,12 @@ async def check_signals(symbol, timeframe='4h'):
                 return
             if current_price >= current_pos['sl_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
-                await enqueue_message(
-                    f"{symbol} {timeframe}: STOP SHORT ⛔\n"
-                    f"Price: {fmt_sym(symbol, current_price)}\n"
-                    f"P/L: {profit_percent:+.2f}%\n"
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: STOP SHORT ⛔",
+                    f"Price: {fmt_sym(symbol, current_price)}",
+                    f"P/L: {profit_percent:+.2f}%",
                     f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
-                )
+                ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
                     'highest_price': None, 'lowest_price': None, 'avg_atr_ratio': None,
@@ -1227,10 +1125,12 @@ async def check_signals(symbol, timeframe='4h'):
         # Telemetri
         blocked_by_froth = 0 if froth_ok_long else 1
         passed_because_strong = 1 if trend_strong_long and not froth_ok_long else 0
-        logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} passed_because_strong:{passed_because_strong}")
+        if VERBOSE_LOG:
+            logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} passed_because_strong:{passed_because_strong}")
     except Exception as e:
         logger.exception(f"Hata ({symbol} {timeframe}): {str(e)}")
         return
+
 # ================== Main ==================
 async def main():
     await load_markets()
@@ -1261,5 +1161,6 @@ async def main():
         logger.info(f"Tur bitti, {total_scanned} sembol tarandı, {elapsed:.1f}s sürdü, {sleep_sec:.1f}s bekle...")
         await asyncio.sleep(sleep_sec)
         save_state()
+
 if __name__ == "__main__":
     asyncio.run(main())
