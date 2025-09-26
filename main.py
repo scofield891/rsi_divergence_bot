@@ -24,6 +24,8 @@ if not BOT_TOKEN or not CHAT_ID:
     raise RuntimeError("BOT_TOKEN ve CHAT_ID ortam değişkenlerini ayarla.")
 TEST_MODE = False
 VERBOSE_LOG = False
+HEARTBEAT_ENABLED = False
+STARTUP_MSG_ENABLED = True
 LOOKBACK_ATR = 18
 SL_MULTIPLIER = 1.8
 TP_MULTIPLIER1 = 2.0
@@ -34,7 +36,6 @@ INSTANT_SL_BUFFER = 0.05
 LOOKBACK_SMI = 20
 ADX_PERIOD = 14
 ADX_THRESHOLD = 15
-ADX_NORMAL_HIGH = 21
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
 RETEST_CONFIRM_BARS = 5
 LATE_WAIT_BARS = 15
@@ -81,12 +82,6 @@ NTX_FROTH_K = 1.0
 EMA_FAST = 10
 EMA_MID = 30
 EMA_SLOW = 90
-SLOPE_WINDOW = 5
-CONFIRM_K_ATR = 0.20
-RETEST_K_ATR = 0.30
-D_K_ATR = 0.10
-USE_STACK_ONLY = False
-USE_STACK_FRESH = True
 DEB_WEAK = 3
 DEB_MED = 2
 DEB_STR = 1
@@ -98,13 +93,12 @@ REQUIRE_NTX_FOR_HARD = True
 EARLY_EXTRA_FILTER = True
 MIN_BARS = 80
 NEW_SYMBOL_COOLDOWN_MIN = 180
-
-def _risk_label(score: float) -> str:
-    if score < 20: return "Çok düşük risk 🟢"
-    if score < 40: return "Düşük risk 🟢"
-    if score < 60: return "Orta risk ⚠️"
-    if score < 80: return "Yüksek risk 🟠"
-    return "Aşırı risk 🔴"
+ADX_RISE_K = 5
+ADX_RISE_MIN_NET = 1.0
+ADX_RISE_POS_RATIO = 0.6
+ADX_RISE_EPS = 0.0
+ADX_RISE_USE_HYBRID = True
+RETEST_K_ATR = 0.30
 
 # ================== Logging ==================
 logger = logging.getLogger()
@@ -368,7 +362,7 @@ def calculate_bb(df, period=20, mult=2.0):
     return df
 
 def calculate_kc(df, period=20, atr_period=20, mult=1.5):
-    df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period))
+    df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period), index=df.index)
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -470,12 +464,6 @@ def calculate_indicators(df, symbol, timeframe):
     return df, df['squeeze_off'].iloc[-2], df['smi'].iloc[-2], 'green' if df['smi'].iloc[-2] > 0 else 'red' if df['smi'].iloc[-2] < 0 else 'gray', adx_condition, di_condition_long, di_condition_short
 
 # ========= ADX Rising =========
-ADX_RISE_K = 5
-ADX_RISE_MIN_NET = 1.0
-ADX_RISE_POS_RATIO = 0.6
-ADX_RISE_EPS = 0.0
-ADX_RISE_USE_HYBRID = True
-
 def adx_rising_strict(df_adx: pd.Series) -> bool:
     if df_adx is None or len(df_adx) < ADX_RISE_K + 1:
         return False
@@ -1159,29 +1147,26 @@ async def check_signals(symbol, timeframe='4h'):
                 save_state()
                 return
             signal_cache[key] = current_pos
-        blocked_by_froth = 0 if froth_ok_long else 1
-        passed_because_strong = 1 if trend_strong_long and not froth_ok_long else 0
-        if VERBOSE_LOG:
-            logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} passed_because_strong:{passed_because_strong}")
         await mark_status(symbol, "ok")
     except ccxt.NetworkError as e:
         await mark_status(symbol, "error", f"network:{str(e)[:120]}")
-        logger.exception(f"Ağ hatası ({symbol} {timeframe}): {str(e)}, 10s bekle")
+        logger.exception(f"Ağ hatası ({symbol} {timeframe}): {e}, 10s bekle")
         await asyncio.sleep(10)
         return
     except Exception as e:
         await mark_status(symbol, "error", f"exception:{str(e)[:120]}")
-        logger.exception(f"Hata ({symbol} {timeframe}): {str(e)}")
+        logger.exception(f"Hata ({symbol} {timeframe}): {e}")
         return
 
 # ================== Main ==================
 async def main():
     await load_markets()
     tz = pytz.timezone('Europe/Istanbul')
-    try:
-        await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı 🟢 " + datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S'))
-    except Exception as e:
-        logger.warning(f"Açılış mesajı gönderilemedi: {e}")
+    if STARTUP_MSG_ENABLED:
+        try:
+            await telegram_bot.send_message(chat_id=CHAT_ID, text="Bot başladı 🟢 " + datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S'))
+        except Exception as e:
+            logger.warning(f"Açılış mesajı gönderilemedi: {e}")
     asyncio.create_task(message_sender())
     timeframes = ['4h']
     symbols = await discover_bybit_symbols(linear_only=LINEAR_ONLY, quote_whitelist=QUOTE_WHITELIST)
@@ -1208,12 +1193,17 @@ async def main():
         sleep_sec = max(0.0, 120.0 - elapsed)
         async with _stats_lock:
             codes = Counter(v['code'] for v in scan_status.values())
-            total = len(symbols)
+            total_symbols = len(symbols)
             missing = [s for s in symbols if s not in scan_status]
-            top3_false = crit_false_counts.most_common(3)
+            crit_lines = []
+            for name, tot in crit_total_counts.items():
+                f = crit_false_counts.get(name, 0)
+                pct = (f / tot * 100.0) if tot else 0.0
+                crit_lines.append((pct, name, f, tot))
+            crit_lines.sort(reverse=True)
         logger.info(
             "Coverage: total=%d | ok=%d | cooldown=%d | min_bars=%d | skip=%d | error=%d | missing=%d",
-            total,
+            total_symbols,
             codes.get('ok', 0),
             codes.get('cooldown', 0),
             codes.get('min_bars', 0),
@@ -1223,17 +1213,19 @@ async def main():
         )
         if missing:
             logger.warning("Missing (ilk 15): %s", ", ".join(missing[:15]))
-        if top3_false:
-            logger.info("Top-3 FALSE kriter: %s", ", ".join(f"{k}={c}" for k, c in top3_false))
+        if crit_lines:
+            logger.info("Kriter FALSE dökümü (yüksekten düşüğe):")
+            for pct, name, f, tot in crit_lines:
+                logger.info(" - %s: %d/%d (%.1f%%)", name, f, tot, pct)
         logger.info(
             "Tur bitti | total=%d | ok=%d | cooldown=%d | min_bars=%d | skip=%d | error=%d | elapsed=%.1fs | bekle=%.1fs",
-            total, codes.get('ok',0), codes.get('cooldown',0), codes.get('min_bars',0),
+            total_symbols, codes.get('ok',0), codes.get('cooldown',0), codes.get('min_bars',0),
             codes.get('skip',0), codes.get('error',0), elapsed, sleep_sec
         )
         loop_count += 1
-        if loop_count % 5 == 0:
+        if HEARTBEAT_ENABLED and (loop_count % 5 == 0):
             await enqueue_message(
-                f"Heartbeat: ok={codes.get('ok',0)}/{total}, "
+                f"Heartbeat: ok={codes.get('ok',0)}/{total_symbols}, "
                 f"cooldown={codes.get('cooldown',0)}, "
                 f"min_bars={codes.get('min_bars',0)}, "
                 f"error={codes.get('error',0)}, "
