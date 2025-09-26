@@ -107,6 +107,9 @@ REQUIRE_RISING_FOR_SOFT = True
 REQUIRE_DI_FOR_HARD = True
 REQUIRE_NTX_FOR_HARD = True
 EARLY_EXTRA_FILTER = True
+# Yeni semboller için cooldown
+MIN_BARS = 80
+NEW_SYMBOL_COOLDOWN_MIN = 180  # 3 saat
 
 def _risk_label(score: float) -> str:
     if score < 20: return "Çok düşük risk 🟢"
@@ -136,6 +139,7 @@ exchange = ccxt.bybit({
     'timeout': 60000
 })
 MARKETS = {}
+new_symbol_until = {}  # symbol -> datetime
 
 async def load_markets():
     global MARKETS
@@ -229,10 +233,12 @@ def fmt_sym(symbol, x):
         return str(x)
 
 def _bars_since_last_true(mask: pd.Series) -> int:
-    """Mask'teki son True'dan beri kaç bar geçtiğini hesapla (ters indexle)"""
-    s = mask.replace(False, np.nan).iloc[::-1]
-    first_true = s.first_valid_index()
-    return len(s) if first_true is None else s.index.get_loc(first_true)
+    # mask: bool seri. Sondan geriye doğru ilk True'u ara
+    rev = mask.values[::-1]
+    if not rev.any():
+        return len(rev)
+    # rev'de ilk True'un indeksi, sondan itibaren geçen bar sayısıdır
+    return int(np.argmax(rev))
 
 def get_regime(df: pd.DataFrame, use_adx=True, adx_th=ADX_SOFT) -> str:
     e30, e90, adx_last = df['ema30'].iloc[-2], df['ema90'].iloc[-2], df['adx'].iloc[-2]
@@ -441,8 +447,8 @@ def get_atr_values(df, lookback_atr=LOOKBACK_ATR):
     return atr_value, avg_atr_ratio
 
 def calculate_indicators(df, symbol, timeframe):
-    if len(df) < 80:
-        logger.warning(f"DF çok kısa ({len(df)}), indikatör hesaplanamadı.")
+    if len(df) < MIN_BARS:
+        logger.info(f"{symbol}: Yetersiz veri ({len(df)} mum), skip.")
         return None, None, None, None, None, None, None
     if 'timestamp' in df.columns:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
@@ -643,6 +649,11 @@ def fake_filter_v2(df: pd.DataFrame, side: str) -> (bool, str):
 async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
     try:
+        # Yeni sembol cooldown kontrolü
+        now = datetime.now(tz)
+        until = new_symbol_until.get(symbol)
+        if until and now < until:
+            return
         # Veri
         if TEST_MODE:
             closes = np.abs(np.cumsum(np.random.randn(200))) * 0.05 + 0.3
@@ -656,8 +667,9 @@ async def check_signals(symbol, timeframe='4h'):
             limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40)
             ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            if df is None or df.empty or len(df) < 80:
-                logger.warning(f"{symbol}: Yetersiz veri ({len(df) if df is not None else 0} mum), skip.")
+            if df is None or df.empty or len(df) < MIN_BARS:
+                new_symbol_until[symbol] = now + timedelta(minutes=NEW_SYMBOL_COOLDOWN_MIN)
+                logger.info(f"{symbol}: Yetersiz veri ({len(df) if df is not None else 0} mum), cooldown.")
                 return
         # İndikatörler
         calc = calculate_indicators(df, symbol, timeframe)
@@ -905,12 +917,12 @@ async def check_signals(symbol, timeframe='4h'):
                     profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
                 else:
                     profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
-                await enqueue_message(
-                    f"{symbol} {timeframe}: REVERSAL CLOSE 🔁\n"
-                    f"Price: {fmt_sym(symbol, current_price)}\n"
-                    f"P/L: {profit_percent:+.2f}%\n"
-                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
-                )
+                await enqueue_message("\n".join([
+                    f"{symbol} {timeframe}: REVERSAL CLOSE 🔁",
+                    f"Price: {fmt_sym(symbol, current_price)}",
+                    f"P/L: {profit_percent:+.2f}%",
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
+                ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
                     'highest_price': None, 'lowest_price': None, 'avg_atr_ratio': None,
@@ -928,7 +940,8 @@ async def check_signals(symbol, timeframe='4h'):
                 (APPLY_COOLDOWN_BOTH_DIRECTIONS or current_pos['last_signal_type'] == 'buy')
             )
             if cooldown_active or current_pos.get('last_bar_time') == bar_time:
-                logger.info(f"{symbol} {timeframe}: BUY atlandı (cooldown veya aynı bar) 🚫")
+                if VERBOSE_LOG:
+                    logger.info(f"{symbol} {timeframe}: BUY atlandı (cooldown veya aynı bar) 🚫")
             else:
                 entry_price = float(closed_candle['close']) if pd.notna(closed_candle['close']) else np.nan
                 eff_sl_mult = SL_MULTIPLIER + SL_BUFFER
@@ -938,7 +951,8 @@ async def check_signals(symbol, timeframe='4h'):
                     logger.warning(f"Geçersiz giriş/SL fiyatı ({symbol} {timeframe}), skip.")
                     return
                 if current_price <= sl_price + INSTANT_SL_BUFFER * atr_value:
-                    logger.info(f"{symbol} {timeframe}: BUY atlandı (anında SL riski) 🚫")
+                    if VERBOSE_LOG:
+                        logger.info(f"{symbol} {timeframe}: BUY atlandı (anında SL riski) 🚫")
                 else:
                     tp1_price = entry_price + (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price + (TP_MULTIPLIER2 * atr_value)
@@ -968,7 +982,8 @@ async def check_signals(symbol, timeframe='4h'):
                 (APPLY_COOLDOWN_BOTH_DIRECTIONS or current_pos['last_signal_type'] == 'sell')
             )
             if cooldown_active or current_pos.get('last_bar_time') == bar_time:
-                logger.info(f"{symbol} {timeframe}: SELL atlandı (cooldown veya aynı bar) 🚫")
+                if VERBOSE_LOG:
+                    logger.info(f"{symbol} {timeframe}: SELL atlandı (cooldown veya aynı bar) 🚫")
             else:
                 entry_price = float(closed_candle['close']) if pd.notna(closed_candle['close']) else np.nan
                 eff_sl_mult = SL_MULTIPLIER + SL_BUFFER
@@ -978,7 +993,8 @@ async def check_signals(symbol, timeframe='4h'):
                     logger.warning(f"Geçersiz giriş/SL fiyatı ({symbol} {timeframe}), skip.")
                     return
                 if current_price >= sl_price - INSTANT_SL_BUFFER * atr_value:
-                    logger.info(f"{symbol} {timeframe}: SELL atlandı (anında SL riski) 🚫")
+                    if VERBOSE_LOG:
+                        logger.info(f"{symbol} {timeframe}: SELL atlandı (anında SL riski) 🚫")
                 else:
                     tp1_price = entry_price - (TP_MULTIPLIER1 * atr_value)
                     tp2_price = entry_price - (TP_MULTIPLIER2 * atr_value)
@@ -1007,6 +1023,7 @@ async def check_signals(symbol, timeframe='4h'):
             if not current_pos['tp1_hit'] and current_price >= current_pos['tp1_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
                 current_pos['remaining_ratio'] -= 0.3
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 current_pos['sl_price'] = current_pos['entry_price']
                 current_pos['tp1_hit'] = True
                 await enqueue_message("\n".join([
@@ -1019,20 +1036,23 @@ async def check_signals(symbol, timeframe='4h'):
             elif not current_pos['tp2_hit'] and current_price >= current_pos['tp2_price'] and current_pos['tp1_hit']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
                 current_pos['remaining_ratio'] -= 0.3
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 current_pos['tp2_hit'] = True
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: TP2 Hit 🎯🎯",
                     f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}",
                     f"P/L: {profit_percent:+.2f}% | %30 kapandı, kalan %40 açık.",
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
                 ]))
                 save_state()
             if exit_cross_long or regime_break_long:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: EMA EXIT (LONG) 🔁",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
-                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
                 ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
@@ -1045,11 +1065,12 @@ async def check_signals(symbol, timeframe='4h'):
                 return
             if current_price <= current_pos['sl_price']:
                 profit_percent = ((current_price - current_pos['entry_price']) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: STOP LONG ⛔",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
-                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
                 ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
@@ -1068,6 +1089,7 @@ async def check_signals(symbol, timeframe='4h'):
             if not current_pos['tp1_hit'] and current_price <= current_pos['tp1_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
                 current_pos['remaining_ratio'] -= 0.3
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 current_pos['sl_price'] = current_pos['entry_price']
                 current_pos['tp1_hit'] = True
                 await enqueue_message("\n".join([
@@ -1080,20 +1102,23 @@ async def check_signals(symbol, timeframe='4h'):
             elif not current_pos['tp2_hit'] and current_price <= current_pos['tp2_price'] and current_pos['tp1_hit']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
                 current_pos['remaining_ratio'] -= 0.3
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 current_pos['tp2_hit'] = True
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: TP2 Hit 🎯🎯",
                     f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}",
-                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, kalan %40 açık."
+                    f"P/L: {profit_percent:+.2f}% | %30 kapandı, kalan %40 açık.",
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
                 ]))
                 save_state()
             if exit_cross_short or regime_break_short:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: EMA EXIT (SHORT) 🔁",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
-                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
                 ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
@@ -1106,11 +1131,12 @@ async def check_signals(symbol, timeframe='4h'):
                 return
             if current_price >= current_pos['sl_price']:
                 profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
+                current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: STOP SHORT ⛔",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
-                    f"Kalan %{current_pos['remaining_ratio']*100:.0f} kapandı."
+                    f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
                 ]))
                 signal_cache[key] = {
                     'signal': None, 'entry_price': None, 'sl_price': None, 'tp1_price': None, 'tp2_price': None,
@@ -1127,6 +1153,10 @@ async def check_signals(symbol, timeframe='4h'):
         passed_because_strong = 1 if trend_strong_long and not froth_ok_long else 0
         if VERBOSE_LOG:
             logger.info(f"{symbol} {timeframe} blocked_by_froth:{blocked_by_froth} passed_because_strong:{passed_because_strong}")
+    except ccxt.NetworkError as e:
+        logger.exception(f"Ağ hatası ({symbol} {timeframe}): {str(e)}, 10s bekle")
+        await asyncio.sleep(10)
+        return
     except Exception as e:
         logger.exception(f"Hata ({symbol} {timeframe}): {str(e)}")
         return
