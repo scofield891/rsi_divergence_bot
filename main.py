@@ -724,26 +724,29 @@ async def check_signals(symbol, timeframe='4h'):
         k_short = _bars_since_last_true(cross_dn_3090)
         in_retest_long = (k_long <= 15)
         in_retest_short = (k_short <= 15)
+        window_ema_long = (16 <= k_long <= 20)
+        window_ema_short = (16 <= k_short <= 20)
         in_ema_long = (k_long >= 16)
         in_ema_short = (k_short >= 16)
         # --- SMI açık renk (koyu ise iptal) ---
         smi_open_green = (np.isfinite(smi_norm) and smi_norm > 0 and abs(smi_norm) < SMI_LIGHT_NORM_MAX_EFF)
         smi_open_red = (np.isfinite(smi_norm) and smi_norm < 0 and abs(smi_norm) < SMI_LIGHT_NORM_MAX_EFF)
-        # --- 10/30 baz onay (yalnızca kesişim+EMA sıralaması) ---
+        # --- 10/30 baz onay (kesişim + EMA sıralaması + 8 mumluk pencere) ---
         cross_up_1030 = (e10.shift(1) <= e30.shift(1)) & (e10 > e30)
         cross_dn_1030 = (e10.shift(1) >= e30.shift(1)) & (e10 < e30)
         bars_since_1030_up = _bars_since_last_true(cross_up_1030)
         bars_since_1030_dn = _bars_since_last_true(cross_dn_1030)
         confirm_1030_L_base = (bars_since_1030_up <= CROSS_1030_CONFIRM_BARS) and (e10.iloc[-2] > e30.iloc[-2] > e90.iloc[-2])
         confirm_1030_S_base = (bars_since_1030_dn <= CROSS_1030_CONFIRM_BARS) and (e10.iloc[-2] < e30.iloc[-2] < e90.iloc[-2])
-        # --- Retest kontrol ---
-        retest_confirm_ok_L = (df['low'].iloc[-2] <= e30.iloc[-2] <= closed_candle['close']) or (abs(float(df['low'].iloc[-2]) - float(df['ema30'].iloc[-2])) <= RETEST_K_ATR * atr_value)
-        retest_confirm_ok_S = (df['high'].iloc[-2] >= e30.iloc[-2] >= closed_candle['close']) or (abs(float(df['high'].iloc[-2]) - float(df['ema30'].iloc[-2])) <= RETEST_K_ATR * atr_value)
+        # --- Retest kontrol (NET TEMAS) ---
+        retest_confirm_ok_L = (df['low'].iloc[-2] <= e30.iloc[-2] <= df['high'].iloc[-2])
+        retest_confirm_ok_S = (df['high'].iloc[-2] >= e30.iloc[-2] >= df['low'].iloc[-2])
         # --- RETEST (k ≤ 15) ---
         retest_trigger_L = (
             in_retest_long
             and retest_confirm_ok_L
             and is_green
+            and (closed_candle['close'] > e10.iloc[-2])
             and (closed_candle['close'] > e30.iloc[-2] > e90.iloc[-2])
             and dir_long_ok and fk_ok_L and froth_ok_long
         )
@@ -751,12 +754,13 @@ async def check_signals(symbol, timeframe='4h'):
             in_retest_short
             and retest_confirm_ok_S
             and is_red
+            and (closed_candle['close'] < e10.iloc[-2])
             and (closed_candle['close'] < e30.iloc[-2] < e90.iloc[-2])
             and dir_short_ok and fk_ok_S and froth_ok_short
         )
-        # --- EMA GEÇ (k ≥ 16) ---
+        # --- EMA GEÇ (sadece 16–20) ---
         ema_gec_L = (
-            in_ema_long
+            window_ema_long
             and (e10.iloc[-2] > e30.iloc[-2] > e90.iloc[-2])
             and (closed_candle['close'] > e30.iloc[-2])
             and is_green
@@ -764,14 +768,14 @@ async def check_signals(symbol, timeframe='4h'):
             and dir_long_ok and fk_ok_L and froth_ok_long
         )
         ema_gec_S = (
-            in_ema_short
+            window_ema_short
             and (e10.iloc[-2] < e30.iloc[-2] < e90.iloc[-2])
             and (closed_candle['close'] < e30.iloc[-2])
             and is_red
             and smi_open_red
             and dir_short_ok and fk_ok_S and froth_ok_short
         )
-        # --- 10/30 Onay (opsiyonel tetikleyici, k ≥ 16) ---
+        # --- 10/30 Onay (k ≥ 16; 8 mum içinde şartlar sağlanmalı) ---
         onay_1030_L = (
             in_ema_long
             and confirm_1030_L_base
@@ -815,8 +819,8 @@ async def check_signals(symbol, timeframe='4h'):
             ("fk_short", fk_ok_S),
             ("froth_long", froth_ok_long),
             ("froth_short", froth_ok_short),
-            ("k_window_L", in_retest_long or in_ema_long),
-            ("k_window_S", in_retest_short or in_ema_short),
+            ("k_window_L", in_retest_long or window_ema_long),
+            ("k_window_S", in_retest_short or window_ema_short),
         ]
         await record_crit_batch(criteria)
         if VERBOSE_LOG:
