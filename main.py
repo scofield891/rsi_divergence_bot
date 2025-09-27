@@ -1,4 +1,4 @@
-import ccxt
+import ccxt 
 import numpy as np
 import pandas as pd
 import telegram
@@ -16,7 +16,6 @@ from urllib3.util.retry import Retry
 from logging.handlers import RotatingFileHandler
 import json
 from collections import Counter
-
 # ================== Sabit Değerler ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -39,7 +38,7 @@ ADX_THRESHOLD = 15
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
 RETEST_CONFIRM_BARS = 7
 LATE_WAIT_BARS = 15
-CROSS_1030_CONFIRM_BARS = 5
+CROSS_1030_CONFIRM_BARS = 8
 SMI_LIGHT_NORM_MAX = 0.75
 SMI_LIGHT_ADAPTIVE = True
 SMI_LIGHT_PCTL = 0.75
@@ -70,9 +69,9 @@ OBV_SLOPE_WIN = 3
 NTX_PERIOD = 14
 NTX_K_EFF = 10
 NTX_VOL_WIN = 60
-NTX_THR_LO, NTX_THR_HI = 48.0, 58.0
+NTX_THR_LO, NTX_THR_HI = 44.0, 54.0
 NTX_ATRZ_LO, NTX_ATRZ_HI = -1.0, 1.5
-NTX_MIN_FOR_HYBRID = 48.0
+NTX_MIN_FOR_HYBRID = 44.0
 NTX_RISE_K_STRICT = 5
 NTX_RISE_MIN_NET = 1.0
 NTX_RISE_POS_RATIO = 0.6
@@ -99,7 +98,6 @@ ADX_RISE_POS_RATIO = 0.6
 ADX_RISE_EPS = 0.0
 ADX_RISE_USE_HYBRID = True
 RETEST_K_ATR = 0.40
-
 # ================== Logging ==================
 logger = logging.getLogger()
 if not logger.handlers:
@@ -113,7 +111,6 @@ if not logger.handlers:
     logger.addHandler(file_handler)
 logging.getLogger('telegram').setLevel(logging.ERROR)
 logging.getLogger('httpx').setLevel(logging.ERROR)
-
 # ================== Borsa & Bot ==================
 exchange = ccxt.bybit({
     'enableRateLimit': True,
@@ -126,11 +123,9 @@ _stats_lock = asyncio.Lock()
 scan_status = {}
 crit_false_counts = Counter()
 crit_total_counts = Counter()
-
 async def load_markets():
     global MARKETS
     MARKETS = await asyncio.to_thread(exchange.load_markets)
-
 def configure_exchange_session(exchange, pool=50):
     s = requests.Session()
     adapter = HTTPAdapter(
@@ -141,13 +136,11 @@ def configure_exchange_session(exchange, pool=50):
     s.mount('https://', adapter)
     s.mount('http://', adapter)
     exchange.session = s
-
 configure_exchange_session(exchange, pool=50)
 telegram_bot = telegram.Bot(
     token=BOT_TOKEN,
     request=telegram.request.HTTPXRequest(connection_pool_size=20, pool_timeout=30.0)
 )
-
 # ================== Global State ==================
 signal_cache = {}
 message_queue = asyncio.Queue(maxsize=1000)
@@ -156,12 +149,10 @@ _rate_lock = asyncio.Lock()
 _last_call_ts = 0.0
 STATE_FILE = 'positions.json'
 DT_KEYS = {"last_signal_time", "entry_time", "last_bar_time", "last_regime_bar"}
-
 def _json_default(o):
     if isinstance(o, datetime):
         return o.isoformat()
     return str(o)
-
 def _parse_dt(val):
     if isinstance(val, str):
         try:
@@ -169,7 +160,6 @@ def _parse_dt(val):
         except Exception:
             return val
     return val
-
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -185,45 +175,37 @@ def load_state():
             logger.warning(f"State yüklenemedi: {e}")
             return {}
     return {}
-
 def save_state():
     try:
         with open(STATE_FILE, 'w') as f:
             json.dump(signal_cache, f, default=_json_default)
     except Exception as e:
         logger.warning(f"State kaydedilemedi: {e}")
-
 signal_cache = load_state()
-
 # ================== Util ==================
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
-
 def pct_rank(series: pd.Series, value: float) -> float:
     s = series.dropna()
     if not np.isfinite(value) or s.empty:
         return 0.0
     return float((s < value).mean())
-
 def rolling_z(series: pd.Series, win: int) -> float:
     s = series.tail(win).astype(float)
     if s.size < 5 or s.std(ddof=0) == 0 or not np.isfinite(s.iloc[-1]):
         return 0.0
     return float((s.iloc[-1] - s.mean()) / (s.std(ddof=0) + 1e-12))
-
 def fmt_sym(symbol, x):
     try:
         prec = MARKETS.get(symbol, {}).get('precision', {}).get('price', 5)
         return f"{float(x):.{prec}f}"
     except Exception:
         return str(x)
-
 def _bars_since_last_true(mask: pd.Series) -> int:
     rev = mask.values[::-1]
     if not rev.any():
         return len(rev)
     return int(np.argmax(rev))
-
 def get_regime(df: pd.DataFrame, use_adx=True, adx_th=ADX_SOFT) -> str:
     e30, e90, adx_last = df['ema30'].iloc[-2], df['ema90'].iloc[-2], df['adx'].iloc[-2]
     if use_adx and not pd.isna(adx_last) and adx_last < adx_th:
@@ -231,25 +213,21 @@ def get_regime(df: pd.DataFrame, use_adx=True, adx_th=ADX_SOFT) -> str:
     if e30 > e90: return "bull"
     if e30 < e90: return "bear"
     return "neutral"
-
 async def mark_status(symbol: str, code: str, detail: str = ""):
     async with _stats_lock:
         scan_status[symbol] = {'code': code, 'detail': detail}
-
 async def record_crit_batch(items):
     async with _stats_lock:
         for name, passed in items:
             crit_total_counts[name] += 1
             if not passed:
                 crit_false_counts[name] += 1
-
 # ================== Mesaj Kuyruğu ==================
 async def enqueue_message(text: str):
     try:
         message_queue.put_nowait(text)
     except asyncio.QueueFull:
         logger.warning("Mesaj kuyruğu dolu, mesaj düşürüldü.")
-
 async def message_sender():
     while True:
         message = await message_queue.get()
@@ -264,7 +242,6 @@ async def message_sender():
         except Exception as e:
             logger.error(f"Telegram mesaj hatası: {str(e)}")
         message_queue.task_done()
-
 # ================== Rate-limit Dostu Fetch ==================
 async def fetch_ohlcv_async(symbol, timeframe, limit):
     global _last_call_ts
@@ -287,7 +264,6 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
             logger.warning(f"Network/Timeout {symbol} {timeframe}, retry in {backoff:.1f}s ({e.__class__.__name__})")
             await asyncio.sleep(backoff)
     raise ccxt.NetworkError(f"fetch_ohlcv failed after retries: {symbol} {timeframe}")
-
 # ================== Sembol Keşfi ==================
 async def discover_bybit_symbols(linear_only=True, quote_whitelist=("USDT",)):
     markets = await asyncio.to_thread(exchange.load_markets)
@@ -301,7 +277,6 @@ async def discover_bybit_symbols(linear_only=True, quote_whitelist=("USDT",)):
     syms = sorted(set(syms))
     logger.info(f"Keşfedilen sembol sayısı: {len(syms)} (linear={linear_only}, quotes={quote_whitelist})")
     return syms
-
 # ================== İndikatör Fonksiyonları ==================
 def calculate_ema(closes, span):
     k = 2 / (span + 1)
@@ -310,7 +285,6 @@ def calculate_ema(closes, span):
     for i in range(1, len(closes)):
         ema[i] = (closes[i] * k) + (ema[i-1] * (1 - k))
     return ema
-
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
         return np.zeros(len(closes), dtype=np.float64)
@@ -330,7 +304,6 @@ def calculate_rsi(closes, period=14):
         rs = (up / down) if down != 0 else (float('inf') if up > 0 else 0)
         rsi[i] = 100. - 100. / (1. + rs) if rs != float('inf') else 100.
     return rsi
-
 def calculate_adx(df, symbol, period=ADX_PERIOD):
     df['high_diff'] = df['high'] - df['high'].shift(1)
     df['low_diff'] = df['low'].shift(1) - df['low']
@@ -353,14 +326,12 @@ def calculate_adx(df, symbol, period=ADX_PERIOD):
     if VERBOSE_LOG:
         logger.info(f"ADX calculated: {df['adx'].iloc[-2]:.2f} for {symbol} at {df.index[-2]}")
     return df, adx_condition, di_condition_long, di_condition_short
-
 def calculate_bb(df, period=20, mult=2.0):
     df['bb_mid'] = df['close'].rolling(period).mean()
     df['bb_std'] = df['close'].rolling(period).std()
     df['bb_upper'] = df['bb_mid'] + mult * df['bb_std']
     df['bb_lower'] = df['bb_mid'] - mult * df['bb_std']
     return df
-
 def calculate_kc(df, period=20, atr_period=20, mult=1.5):
     df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period), index=df.index)
     high_low = df['high'] - df['low']
@@ -371,12 +342,10 @@ def calculate_kc(df, period=20, atr_period=20, mult=1.5):
     df['kc_upper'] = df['kc_mid'] + mult * df['atr_kc']
     df['kc_lower'] = df['kc_mid'] - mult * df['atr_kc']
     return df
-
 def calculate_squeeze(df):
     df['squeeze_on'] = (df['bb_lower'] > df['kc_lower']) & (df['bb_upper'] < df['kc_upper'])
     df['squeeze_off'] = (df['bb_lower'] < df['kc_lower']) & (df['bb_upper'] > df['kc_upper'])
     return df
-
 def calculate_smi_momentum(df, length=LOOKBACK_SMI):
     highest = df['high'].rolling(length).max()
     lowest = df['low'].rolling(length).min()
@@ -396,7 +365,6 @@ def calculate_smi_momentum(df, length=LOOKBACK_SMI):
         smi.iloc[i] = slope * (length - 1) + intercept
     df['smi'] = smi
     return df
-
 def ensure_atr(df, period=14):
     if 'atr' in df.columns:
         return df
@@ -406,7 +374,6 @@ def ensure_atr(df, period=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.rolling(window=period).mean()
     return df
-
 def calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60):
     close = df['close'].values
     vol = df['volume'].values
@@ -428,7 +395,6 @@ def calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60):
     denom = (1.4826 * df['vol_mad']).replace(0, np.nan)
     df['vol_z'] = (vol_s - df['vol_med']) / denom
     return df
-
 def get_atr_values(df, lookback_atr=LOOKBACK_ATR):
     df = ensure_atr(df, period=14)
     if len(df) < lookback_atr + 2:
@@ -440,7 +406,6 @@ def get_atr_values(df, lookback_atr=LOOKBACK_ATR):
     atr_value = float(df['atr'].iloc[-2]) if pd.notna(df['atr'].iloc[-2]) else np.nan
     avg_atr_ratio = float(atr_series.mean() / close_last)
     return atr_value, avg_atr_ratio
-
 def calculate_indicators(df, symbol, timeframe):
     if len(df) < MIN_BARS:
         logger.info(f"{symbol}: Yetersiz veri ({len(df)} mum), skip.")
@@ -462,7 +427,6 @@ def calculate_indicators(df, symbol, timeframe):
     df = calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60)
     df = calc_ntx(df, period=NTX_PERIOD, k_eff=NTX_K_EFF)
     return df, df['squeeze_off'].iloc[-2], df['smi'].iloc[-2], 'green' if df['smi'].iloc[-2] > 0 else 'red' if df['smi'].iloc[-2] < 0 else 'gray', adx_condition, di_condition_long, di_condition_short
-
 # ========= ADX Rising =========
 def adx_rising_strict(df_adx: pd.Series) -> bool:
     if df_adx is None or len(df_adx) < ADX_RISE_K + 1:
@@ -476,7 +440,6 @@ def adx_rising_strict(df_adx: pd.Series) -> bool:
     pos_ratio = (diffs > ADX_RISE_EPS).mean() if diffs.size > 0 else 0.0
     net = window.iloc[-1] - window.iloc[0]
     return (slope > 0) and (net >= ADX_RISE_MIN_NET) and (pos_ratio >= ADX_RISE_POS_RATIO)
-
 def adx_rising_hybrid(df_adx: pd.Series) -> bool:
     if not ADX_RISE_USE_HYBRID:
         return False
@@ -489,12 +452,10 @@ def adx_rising_hybrid(df_adx: pd.Series) -> bool:
     slope, _ = np.polyfit(x, window.values, 1)
     last_diff = window.values[-1] - window.values[-2]
     return (slope > 0) and (last_diff > ADX_RISE_EPS)
-
 def adx_rising(df: pd.DataFrame) -> bool:
     if 'adx' not in df.columns:
         return False
     return adx_rising_strict(df['adx']) or adx_rising_hybrid(df['adx'])
-
 def _debounce_required(side: str, adx_last: float, rising: bool, di_align: bool, ntx_rise: bool) -> int:
     if adx_last >= ADX_HARD:
         hard_ok = True
@@ -512,7 +473,6 @@ def _debounce_required(side: str, adx_last: float, rising: bool, di_align: bool,
     if adx_last >= 20:
         return DEB_MED
     return DEB_WEAK
-
 # ==== NTX ====
 def calc_ntx(df: pd.DataFrame, period: int = NTX_PERIOD, k_eff: int = NTX_K_EFF) -> pd.DataFrame:
     close = df['close'].astype(float)
@@ -540,11 +500,9 @@ def calc_ntx(df: pd.DataFrame, period: int = NTX_PERIOD, k_eff: int = NTX_K_EFF)
     df['ntx_raw'] = base
     df['ntx'] = df['ntx_raw'].ewm(alpha=1.0/period, adjust=False).mean() * 100.0
     return df
-
 def ntx_threshold(atr_z: float) -> float:
     a = clamp((atr_z - NTX_ATRZ_LO) / (NTX_ATRZ_HI - NTX_ATRZ_LO + 1e-12), 0.0, 1.0)
     return NTX_THR_LO + a * (NTX_THR_HI - NTX_THR_LO)
-
 def ntx_rising_strict(s: pd.Series, k: int = NTX_RISE_K_STRICT, min_net: float = NTX_RISE_MIN_NET, pos_ratio_th: float = NTX_RISE_POS_RATIO, eps: float = NTX_RISE_EPS) -> bool:
     if s is None or len(s) < k + 1: return False
     w = s.iloc[-(k+1):-1].astype(float)
@@ -554,7 +512,6 @@ def ntx_rising_strict(s: pd.Series, k: int = NTX_RISE_K_STRICT, min_net: float =
     posr = (diffs > eps).mean() if diffs.size else 0.0
     net = w.iloc[-1] - w.iloc[0]
     return (slope > 0) and (net >= min_net) and (posr >= pos_ratio_th)
-
 def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE_EPS, min_ntx: float = NTX_MIN_FOR_HYBRID, k: int = NTX_RISE_K_HYBRID, froth_k: float = NTX_FROTH_K) -> bool:
     s = df['ntx'] if 'ntx' in df.columns else None
     if s is None or len(s) < k + 1: return False
@@ -572,7 +529,6 @@ def ntx_rising_hybrid_guarded(df: pd.DataFrame, side: str, eps: float = NTX_RISE
     if abs(close_last - ema10_last) > froth_k * atr_value:
         return False
     return True
-
 # ================== Candle Body/Wicks (FakeFilter için) ==================
 def candle_body_wicks(row):
     o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
@@ -581,7 +537,6 @@ def candle_body_wicks(row):
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
     return body / rng, upper_wick / rng, lower_wick / rng
-
 # === FakeFilter v2 ===
 def _bb_prox(last, side="long"):
     if side == "long":
@@ -590,13 +545,11 @@ def _bb_prox(last, side="long"):
         num = float(last['bb_mid'] - last['close']); den = float(last['bb_mid'] - last['bb_lower'])
     if not (np.isfinite(num) and np.isfinite(den)) or den <= 0: return 0.0
     return clamp(num/den, 0.0, 1.0)
-
 def _obv_slope_recent(df: pd.DataFrame, win=OBV_SLOPE_WIN) -> float:
     s = df['obv'].iloc[-(win+1):-1].astype(float)
     if s.size < 3 or s.isna().any(): return 0.0
     x = np.arange(len(s)); m,_ = np.polyfit(x, s.values, 1)
     return float(m)
-
 def simple_volume_ok(df: pd.DataFrame, side: str) -> (bool, str):
     if len(df) < VOL_WIN + 2:
         return False, "data_short"
@@ -612,28 +565,33 @@ def simple_volume_ok(df: pd.DataFrame, side: str) -> (bool, str):
         return False, "vol_data_invalid"
     vol_ok = (vol_ratio >= VOL_MA_RATIO_MIN) and (vol_z >= VOL_Z_MIN)
     return vol_ok, f"dvol_usd={dvol_usd:.0f}, vol_ratio={vol_ratio:.2f}, vol_z={vol_z:.2f}, ref={dvol_ref:.0f}"
-
 def fake_filter_v2(df: pd.DataFrame, side: str) -> (bool, str):
     if len(df) < max(VOL_WIN + 2, OBV_SLOPE_WIN + 2):
         return False, "data_short"
+
     last = df.iloc[-2]
-    vol_ok, vol_reason = simple_volume_ok(df, side)
-    if not vol_ok:
-        return False, f"vol_fail: {vol_reason}"
+    vol_ok, vol_reason = simple_volume_ok(df, side)  # erken return YOK
+
     body, up, low = candle_body_wicks(last)
     bb_prox = _bb_prox(last, side=side)
     obv_slope = _obv_slope_recent(df, win=OBV_SLOPE_WIN)
-    body_ok = body >= FF_BODY_MIN
-    wick_ok = up <= FF_UPWICK_MAX if side == "long" else low <= FF_DNWICK_MAX
-    bb_ok = bb_prox >= FF_BB_MIN
-    obv_ok = (obv_slope > 0) if side == "long" else (obv_slope < 0)
-    all_ok = (int(body_ok) + int(wick_ok) + int(bb_ok) + int(obv_ok)) >= 3
-    debug = (f"body={body:.2f} ({'OK' if body_ok else 'FAIL'}), "
-             f"wick={up if side=='long' else low:.2f} ({'OK' if wick_ok else 'FAIL'}), "
-             f"bb_prox={bb_prox:.2f} ({'OK' if bb_ok else 'FAIL'}), "
-             f"obv_slope={obv_slope:.2f} ({'OK' if obv_ok else 'FAIL'}), {vol_reason}")
-    return all_ok, debug
 
+    body_ok = body >= FF_BODY_MIN
+    wick_ok = (up <= FF_UPWICK_MAX) if side == "long" else (low <= FF_DNWICK_MAX)
+    bb_ok   = bb_prox >= FF_BB_MIN
+    obv_ok  = (obv_slope > 0) if side == "long" else (obv_slope < 0)
+
+    score  = int(vol_ok) + int(body_ok) + int(wick_ok) + int(bb_ok) + int(obv_ok)
+    all_ok = score >= 3
+
+    debug = (
+        f"vol={'OK' if vol_ok else 'FAIL'} ({vol_reason}), "
+        f"body={body:.2f} ({'OK' if body_ok else 'FAIL'}), "
+        f"wick={(up if side=='long' else low):.2f} ({'OK' if wick_ok else 'FAIL'}), "
+        f"bb_prox={bb_prox:.2f} ({'OK' if bb_ok else 'FAIL'}), "
+        f"obv_slope={obv_slope:.2f} ({'OK' if obv_ok else 'FAIL'})"
+    )
+    return all_ok, debug
 # ================== Sinyal Döngüsü ==================
 async def check_signals(symbol, timeframe='4h'):
     tz = pytz.timezone('Europe/Istanbul')
@@ -722,6 +680,7 @@ async def check_signals(symbol, timeframe='4h'):
         else:
             dir_long_ok, dir_short_ok = di_long, di_short
             str_ok = strength_ok
+        logger.info(f"{symbol} {timeframe} NTX last={ntx_last:.2f}, thr={ntx_thr:.2f}, ok={ntx_ok}")
         if VERBOSE_LOG:
             logger.info(f"{symbol} {timeframe} NTX_last:{ntx_last:.2f} thr:{ntx_thr:.2f} ntx_ok:{ntx_ok} ntx_rising_str:{ntx_rising_str} rising_long:{rising_long} rising_short:{rising_short}")
         trend_strong_long = dir_long_ok and rising_long
@@ -1157,7 +1116,6 @@ async def check_signals(symbol, timeframe='4h'):
         await mark_status(symbol, "error", f"exception:{str(e)[:120]}")
         logger.exception(f"Hata ({symbol} {timeframe}): {e}")
         return
-
 # ================== Main ==================
 async def main():
     await load_markets()
@@ -1233,6 +1191,5 @@ async def main():
             )
         await asyncio.sleep(sleep_sec)
         save_state()
-
 if __name__ == "__main__":
     asyncio.run(main())
