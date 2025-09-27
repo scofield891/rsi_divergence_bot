@@ -37,16 +37,16 @@ LOOKBACK_SMI = 20
 ADX_PERIOD = 14
 ADX_THRESHOLD = 15
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
-RETEST_CONFIRM_BARS = 5
+RETEST_CONFIRM_BARS = 7
 LATE_WAIT_BARS = 15
 CROSS_1030_CONFIRM_BARS = 5
 SMI_LIGHT_NORM_MAX = 0.75
 SMI_LIGHT_ADAPTIVE = True
-SMI_LIGHT_PCTL = 0.65
+SMI_LIGHT_PCTL = 0.75
 SMI_LIGHT_MAX_MIN = 0.60
-SMI_LIGHT_MAX_MAX = 1.10
+SMI_LIGHT_MAX_MAX = 1.30
 SMI_LIGHT_REQUIRE_SQUEEZE = False
-USE_SMI_SLOPE_CONFIRM = True
+USE_SMI_SLOPE_CONFIRM = False
 USE_FROTH_GUARD = True
 FROTH_GUARD_K_ATR = 1.1
 SIGNAL_MODE = "2of3"
@@ -60,19 +60,19 @@ LINEAR_ONLY = True
 QUOTE_WHITELIST = ("USDT",)
 VOL_WIN = 60
 VOL_Q = 0.60
-VOL_MA_RATIO_MIN = 1.10
-VOL_Z_MIN = 1.5
-FF_BODY_MIN = 0.55
-FF_UPWICK_MAX = 0.25
-FF_DNWICK_MAX = 0.25
-FF_BB_MIN = 0.30
-OBV_SLOPE_WIN = 5
+VOL_MA_RATIO_MIN = 1.05
+VOL_Z_MIN = 1.0
+FF_BODY_MIN = 0.45
+FF_UPWICK_MAX = 0.35
+FF_DNWICK_MAX = 0.35
+FF_BB_MIN = 0.20
+OBV_SLOPE_WIN = 3
 NTX_PERIOD = 14
 NTX_K_EFF = 10
 NTX_VOL_WIN = 60
-NTX_THR_LO, NTX_THR_HI = 52.0, 60.0
+NTX_THR_LO, NTX_THR_HI = 48.0, 58.0
 NTX_ATRZ_LO, NTX_ATRZ_HI = -1.0, 1.5
-NTX_MIN_FOR_HYBRID = 50.0
+NTX_MIN_FOR_HYBRID = 48.0
 NTX_RISE_K_STRICT = 5
 NTX_RISE_MIN_NET = 1.0
 NTX_RISE_POS_RATIO = 0.6
@@ -98,7 +98,7 @@ ADX_RISE_MIN_NET = 1.0
 ADX_RISE_POS_RATIO = 0.6
 ADX_RISE_EPS = 0.0
 ADX_RISE_USE_HYBRID = True
-RETEST_K_ATR = 0.30
+RETEST_K_ATR = 0.40
 
 # ================== Logging ==================
 logger = logging.getLogger()
@@ -627,7 +627,7 @@ def fake_filter_v2(df: pd.DataFrame, side: str) -> (bool, str):
     wick_ok = up <= FF_UPWICK_MAX if side == "long" else low <= FF_DNWICK_MAX
     bb_ok = bb_prox >= FF_BB_MIN
     obv_ok = (obv_slope > 0) if side == "long" else (obv_slope < 0)
-    all_ok = body_ok and wick_ok and bb_ok and obv_ok
+    all_ok = (int(body_ok) + int(wick_ok) + int(bb_ok) + int(obv_ok)) >= 3
     debug = (f"body={body:.2f} ({'OK' if body_ok else 'FAIL'}), "
              f"wick={up if side=='long' else low:.2f} ({'OK' if wick_ok else 'FAIL'}), "
              f"bb_prox={bb_prox:.2f} ({'OK' if bb_ok else 'FAIL'}), "
