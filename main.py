@@ -33,18 +33,10 @@ TP_MULTIPLIER2 = 3.5
 SL_BUFFER = 0.3
 COOLDOWN_MINUTES = 60
 INSTANT_SL_BUFFER = 0.05
-LOOKBACK_SMI = 20
 ADX_PERIOD = 14
 ADX_THRESHOLD = 15
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
 CROSS_1030_CONFIRM_BARS = 8
-SMI_LIGHT_NORM_MAX = 0.75
-SMI_LIGHT_ADAPTIVE = True
-SMI_LIGHT_PCTL = 0.75
-SMI_LIGHT_MAX_MIN = 0.60
-SMI_LIGHT_MAX_MAX = 1.30
-SMI_LIGHT_REQUIRE_SQUEEZE = False
-USE_SMI_SLOPE_CONFIRM = False
 USE_FROTH_GUARD = True
 FROTH_GUARD_K_ATR = 1.1
 SIGNAL_MODE = "2of3"
@@ -88,9 +80,6 @@ ADX_RISE_MIN_NET = 1.0
 ADX_RISE_POS_RATIO = 0.6
 ADX_RISE_EPS = 0.0
 ADX_RISE_USE_HYBRID = True
-RETEST_K_ATR = 0.40
-EMA_LATE_MIN_K = 16
-EMA_LATE_MAX_K = 24
 
 # ================== Logging ==================
 logger = logging.getLogger()
@@ -352,47 +341,11 @@ def calculate_bb(df, period=20, mult=2.0):
     df['bb_lower'] = df['bb_mid'] - mult * df['bb_std']
     return df
 
-def calculate_kc(df, period=20, atr_period=20, mult=1.5):
-    df['kc_mid'] = pd.Series(calculate_ema(df['close'].values, period), index=df.index)
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    df['atr_kc'] = tr.rolling(atr_period).mean()
-    df['kc_upper'] = df['kc_mid'] + mult * df['atr_kc']
-    df['kc_lower'] = df['kc_mid'] - mult * df['atr_kc']
-    return df
-
-def calculate_squeeze(df):
-    df['squeeze_on'] = (df['bb_lower'] > df['kc_lower']) & (df['bb_upper'] < df['kc_upper'])
-    df['squeeze_off'] = (df['bb_lower'] < df['kc_lower']) & (df['bb_upper'] > df['kc_upper'])
-    return df
-
-def calculate_smi_momentum(df, length=LOOKBACK_SMI):
-    highest = df['high'].rolling(length).max()
-    lowest = df['low'].rolling(length).min()
-    avg1 = (highest + lowest) / 2
-    avg2 = df['close'].rolling(length).mean()
-    avg = (avg1 + avg2) / 2
-    diff = df['close'] - avg
-    smi = pd.Series(np.nan, index=df.index)
-    for i in range(length-1, len(df)):
-        y = diff.iloc[i-length+1:i+1].values
-        x = np.arange(length)
-        mask = ~np.isnan(y)
-        if mask.sum() < 2:
-            smi.iloc[i] = np.nan
-            continue
-        slope, intercept = np.polyfit(x[mask], y[mask], 1)
-        smi.iloc[i] = slope * (length - 1) + intercept
-    df['smi'] = smi
-    return df
-
 def calc_sqzmom_lb(df: pd.DataFrame, length=20, mult_bb=2.0, lengthKC=20, multKC=1.5, use_true_range=True):
     src = df['close'].astype(float)
     # --- BB (LazyBear stdev tabanlı) ---
     basis = src.rolling(length).mean()
-    dev   = src.rolling(length).std(ddof=0) * mult_bb
+    dev = src.rolling(length).std(ddof=0) * mult_bb
     upperBB = basis + dev
     lowerBB = basis - dev
     # --- KC (TrueRange opsiyonlu) ---
@@ -400,19 +353,19 @@ def calc_sqzmom_lb(df: pd.DataFrame, length=20, mult_bb=2.0, lengthKC=20, multKC
     if use_true_range:
         tr1 = (df['high'] - df['low']).astype(float)
         tr2 = (df['high'] - df['close'].shift()).abs().astype(float)
-        tr3 = (df['low']  - df['close'].shift()).abs().astype(float)
-        tr  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        tr3 = (df['low'] - df['close'].shift()).abs().astype(float)
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     else:
-        tr  = (df['high'] - df['low']).astype(float)
+        tr = (df['high'] - df['low']).astype(float)
     rangema = tr.rolling(lengthKC).mean()
     upperKC = ma + rangema * multKC
     lowerKC = ma - rangema * multKC
-    sqz_on  = (lowerBB > lowerKC) & (upperBB < upperKC)
+    sqz_on = (lowerBB > lowerKC) & (upperBB < upperKC)
     sqz_off = (lowerBB < lowerKC) & (upperBB > upperKC)
-    no_sqz  = (~sqz_on) & (~sqz_off)
+    no_sqz = (~sqz_on) & (~sqz_off)
     # --- LazyBear val = linreg( src - avg(avg(highest,lowest), sma), lengthKC ) ---
     highest = df['high'].rolling(lengthKC).max()
-    lowest  = df['low'].rolling(lengthKC).min()
+    lowest = df['low'].rolling(lengthKC).min()
     mid1 = (highest + lowest) / 2.0
     mid2 = src.rolling(lengthKC).mean()
     center = (mid1 + mid2) / 2.0
@@ -426,14 +379,14 @@ def calc_sqzmom_lb(df: pd.DataFrame, length=20, mult_bb=2.0, lengthKC=20, multKC
             val.iloc[i] = m*(lengthKC-1) + b
         else:
             val.iloc[i] = np.nan
-    df['lb_sqz_val']   = val
-    df['lb_sqz_on']    = sqz_on
-    df['lb_sqz_off']   = sqz_off
-    df['lb_sqz_no']    = no_sqz
+    df['lb_sqz_val'] = val
+    df['lb_sqz_on'] = sqz_on
+    df['lb_sqz_off'] = sqz_off
+    df['lb_sqz_no'] = no_sqz
     # Renk mantığı (LazyBear ile aynı)
     val_prev = df['lb_sqz_val'].shift(1)
     df['lb_open_green'] = (df['lb_sqz_val'] > 0) & (df['lb_sqz_val'] > val_prev)
-    df['lb_open_red']   = (df['lb_sqz_val'] < 0) & (df['lb_sqz_val'] < val_prev)
+    df['lb_open_red'] = (df['lb_sqz_val'] < 0) & (df['lb_sqz_val'] < val_prev)
     return df
 
 def ensure_atr(df, period=14):
@@ -483,7 +436,7 @@ def get_atr_values(df, lookback_atr=LOOKBACK_ATR):
 def calculate_indicators(df, symbol, timeframe):
     if len(df) < MIN_BARS:
         logger.info(f"{symbol}: Yetersiz veri ({len(df)} mum), skip.")
-        return None, None, None, None, None, None, None
+        return None, None, None, None
     if 'timestamp' in df.columns:
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', errors='coerce')
         df.set_index('timestamp', inplace=True)
@@ -491,17 +444,13 @@ def calculate_indicators(df, symbol, timeframe):
     df['ema10'] = calculate_ema(closes, EMA_FAST)
     df['ema30'] = calculate_ema(closes, EMA_MID)
     df['ema90'] = calculate_ema(closes, EMA_SLOW)
-    df['rsi'] = calculate_rsi(closes, 14)
     df = calculate_bb(df)
-    df = calculate_kc(df)
-    df = calculate_squeeze(df)
-    df = calculate_smi_momentum(df)
     df = calc_sqzmom_lb(df, length=20, mult_bb=2.0, lengthKC=20, multKC=1.5, use_true_range=True)
     df, adx_condition, di_condition_long, di_condition_short = calculate_adx(df, symbol)
     df = ensure_atr(df, period=14)
     df = calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60)
     df = calc_ntx(df, period=NTX_PERIOD, k_eff=NTX_K_EFF)
-    return df, df['squeeze_off'].iloc[-2], df['smi'].iloc[-2], 'green' if df['smi'].iloc[-2] > 0 else 'red' if df['smi'].iloc[-2] < 0 else 'gray', adx_condition, di_condition_long, di_condition_short
+    return df, adx_condition, di_condition_long, di_condition_short
 
 # ========= ADX Rising =========
 def adx_rising_strict(df_adx: pd.Series) -> bool:
@@ -691,7 +640,7 @@ async def check_signals(symbol, timeframe='4h'):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             logger.info(f"Test modu: {symbol} {timeframe}")
         else:
-            limit_need = max(150, LOOKBACK_ATR + 80, LOOKBACK_SMI + 40, ADX_PERIOD + 40)
+            limit_need = max(150, LOOKBACK_ATR + 80, ADX_PERIOD + 40)
             ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             if df is None or df.empty or len(df) < MIN_BARS:
@@ -703,14 +652,38 @@ async def check_signals(symbol, timeframe='4h'):
         if not calc or calc[0] is None:
             await mark_status(symbol, "skip", "indicators_failed")
             return
-        df, smi_squeeze_off, smi_histogram, smi_color, adx_condition, di_condition_long, di_condition_short = calc
+        df, adx_condition, di_condition_long, di_condition_short = calc
         atr_value, avg_atr_ratio = get_atr_values(df, LOOKBACK_ATR)
         if not np.isfinite(atr_value) or not np.isfinite(avg_atr_ratio):
             await mark_status(symbol, "skip", "invalid_atr")
             logger.warning(f"Geçersiz ATR ({symbol} {timeframe}), skip.")
             return
-        # --- (froth'tan ÖNCE) 2-of-3 Kapı Oyları ---
+        # --- ADAPTİF PENCERE AYARI (ADX & ATR_z) ---
         adx_last = float(df['adx'].iloc[-2]) if pd.notna(df['adx'].iloc[-2]) else np.nan
+        atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
+        # Güvenli adx/atr_z
+        _adx = float(adx_last) if np.isfinite(adx_last) else 0.0
+        _atrz = float(atr_z) if np.isfinite(atr_z) else 0.0
+        adx_norm = clamp((_adx - 21.0) / 15.0, 0.0, 1.0)
+        atr_norm = clamp((_atrz - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
+        # Ham değerler
+        _rmax = 12 + 6*(1 - adx_norm) + 2*atr_norm
+        _emin = _rmax + 1
+        _emax = _emin + 6 + 2*atr_norm
+        # Güvenli sınırlar (k bar sayacı için mantıklı aralıklar)
+        RETEST_MAX_K_ADAPT = int(round(clamp(_rmax, 8, 24)))
+        EMA_LATE_MIN_K_ADAPT = int(round(clamp(_emin, 9, 26)))
+        EMA_LATE_MAX_K_ADAPT = int(round(clamp(_emax, 12, 32)))
+        retest_limit_long = retest_limit_short = RETEST_MAX_K_ADAPT
+        ema_min_k = EMA_LATE_MIN_K_ADAPT
+        ema_max_k = EMA_LATE_MAX_K_ADAPT
+        if VERBOSE_LOG:
+            logger.info(
+                f"{symbol} {timeframe} ADAPT k: retest≤{retest_limit_long}, "
+                f"ema=[{ema_min_k},{ema_max_k}] adx={_adx:.1f} adx_n={adx_norm:.2f} "
+                f"atr_z={_atrz:.2f} atr_n={atr_norm:.2f}"
+            )
+        # --- (froth'tan ÖNCE) 2-of-3 Kapı Oyları ---
         rising_adx = adx_rising(df)
         # DI hizası
         dir_long_ok = bool(rising_adx or di_condition_long)
@@ -719,7 +692,6 @@ async def check_signals(symbol, timeframe='4h'):
         vote_adx = (np.isfinite(adx_last) and adx_last >= ADX_SOFT)
         vote_dir_long = dir_long_ok
         vote_dir_short = dir_short_ok
-        atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
         ntx_thr = ntx_threshold(atr_z)
         vote_ntx = ntx_vote(df, ntx_thr)
         gate_long = (int(vote_adx) + int(vote_dir_long) + int(vote_ntx)) >= 2
@@ -749,19 +721,16 @@ async def check_signals(symbol, timeframe='4h'):
         # --- SMI açık renk (LazyBear) ---
         smi_open_green = bool(df['lb_open_green'].iloc[-2])
         smi_open_red = bool(df['lb_open_red'].iloc[-2])
-        if SMI_LIGHT_REQUIRE_SQUEEZE:
-            smi_open_green = smi_open_green and bool(df['lb_sqz_off'].iloc[-2])
-            smi_open_red = smi_open_red and bool(df['lb_sqz_off'].iloc[-2])
         # --- 30/90 pencere sayaçları (k) ---
         e10 = df['ema10']; e30 = df['ema30']; e90 = df['ema90']
         cross_up_3090 = (e30.shift(1) <= e90.shift(1)) & (e30 > e90)
         cross_dn_3090 = (e30.shift(1) >= e90.shift(1)) & (e30 < e90)
         k_long = bars_since(cross_up_3090, idx=-2)
         k_short = bars_since(cross_dn_3090, idx=-2)
-        in_retest_long = (k_long <= 15)
-        in_retest_short = (k_short <= 15)
-        window_ema_long = (EMA_LATE_MIN_K <= k_long <= EMA_LATE_MAX_K)
-        window_ema_short = (EMA_LATE_MIN_K <= k_short <= EMA_LATE_MAX_K)
+        in_retest_long = (k_long <= retest_limit_long)
+        in_retest_short = (k_short <= retest_limit_short)
+        window_ema_long = (ema_min_k <= k_long <= ema_max_k)
+        window_ema_short = (ema_min_k <= k_short <= ema_max_k)
         # --- 10/30 baz onay (kesişim + EMA sıralaması + 8 mumluk pencere) ---
         cross_up_1030 = (e10.shift(1) <= e30.shift(1)) & (e10 > e30)
         cross_dn_1030 = (e10.shift(1) >= e30.shift(1)) & (e10 < e30)
@@ -772,7 +741,7 @@ async def check_signals(symbol, timeframe='4h'):
         # --- Retest kontrol (NET TEMAS) ---
         retest_confirm_ok_L = (df['low'].iloc[-2] <= e30.iloc[-2] <= df['high'].iloc[-2])
         retest_confirm_ok_S = (df['high'].iloc[-2] >= e30.iloc[-2] >= df['low'].iloc[-2])
-        # --- RETEST (k ≤ 15) ---
+        # --- RETEST (≤ limit) ---
         retest_trigger_L = (
             in_retest_long
             and retest_confirm_ok_L
@@ -789,7 +758,7 @@ async def check_signals(symbol, timeframe='4h'):
             and (closed_candle['close'] < e30.iloc[-2] < e90.iloc[-2])
             and dir_short_ok and fk_ok_S and froth_ok_short
         )
-        # --- EMA GEÇ (sadece 16–24) ---
+        # --- EMA GEÇ (sadece adaptif pencere) ---
         ema_gec_L = (
             window_ema_long
             and (e10.iloc[-2] > e30.iloc[-2] > e90.iloc[-2])
@@ -808,7 +777,7 @@ async def check_signals(symbol, timeframe='4h'):
         )
         if ema_gec_L or ema_gec_S:
             logger.info(f"{symbol} {timeframe} EMA_GEC k={k_long if ema_gec_L else k_short} "
-                        f"win=[{EMA_LATE_MIN_K},{EMA_LATE_MAX_K}] "
+                        f"win=[{ema_min_k},{ema_max_k}] "
                         f"lb_val={df['lb_sqz_val'].iloc[-2]:.4g} "
                         f"lb_open_green={bool(df['lb_open_green'].iloc[-2])} "
                         f"lb_open_red={bool(df['lb_open_red'].iloc[-2])}")
