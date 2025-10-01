@@ -1,3 +1,4 @@
+```python
 import ccxt
 import numpy as np
 import pandas as pd
@@ -231,6 +232,21 @@ def get_regime(df: pd.DataFrame, use_adx=True, adx_th=ADX_SOFT) -> str:
     if e30 > e90: return "bull"
     if e30 < e90: return "bear"
     return "neutral"
+
+def fmt_dt(ts, tz_str='Europe/Istanbul', with_tz=True):
+    tz = pytz.timezone(tz_str)
+    if isinstance(ts, pd.Timestamp):
+        ts = ts.tz_localize('UTC') if ts.tzinfo is None else ts
+        ts = ts.astimezone(tz)
+    elif isinstance(ts, datetime):
+        ts = ts.astimezone(tz) if ts.tzinfo else tz.localize(ts)
+    else:
+        return str(ts)
+    return ts.strftime('%Y-%m-%d %H:%M:%S %Z' if with_tz else '%Y-%m-%d %H:%M:%S')
+
+def retest_meta_human(df, meta, tz_str='Europe/Istanbul'):
+    t = lambda i: fmt_dt(df.index[i], tz_str)
+    return f"Retest zamanları → touch: {t(meta['touch_idx'])}, reclaim: {t(meta['reclaim_idx'])}, confirm: {t(meta['confirm_idx'])}"
 
 async def mark_status(symbol: str, code: str, detail: str = ""):
     async with _stats_lock:
@@ -996,15 +1012,20 @@ async def check_signals(symbol, timeframe='4h'):
         # --- Nihai giriş tetikleyicileri ---
         buy_condition = gate_long and (retest_ok_L or ema_late_L)
         sell_condition = gate_short and (retest_ok_S or ema_late_S)
+        reason = ""
+        ret_meta_str = ""
         if buy_condition:
-            reason = "Retest-Zincir" if retest_ok_L else "Late (EMA)"
-            ret_meta_str = f" Retest Meta: {retL_meta}" if retest_ok_L else ""
+            if retest_ok_L:
+                reason = "Retest-Zincir"
+                ret_meta_str = retest_meta_human(df, retL_meta)
+            else:
+                reason = "Late (EMA)"
         elif sell_condition:
-            reason = "Retest-Zincir" if retest_ok_S else "Late (EMA)"
-            ret_meta_str = f" Retest Meta: {retS_meta}" if retest_ok_S else ""
-        else:
-            reason = ""
-            ret_meta_str = ""
+            if retest_ok_S:
+                reason = "Retest-Zincir"
+                ret_meta_str = retest_meta_human(df, retS_meta)
+            else:
+                reason = "Late (EMA)"
         # --- Kriter Sayacı ---
         criteria = [
             ("gate_long", gate_long),
@@ -1064,6 +1085,8 @@ async def check_signals(symbol, timeframe='4h'):
                     profit_percent = ((current_pos['entry_price'] - current_price) / current_pos['entry_price']) * 100 if np.isfinite(current_price) and current_pos['entry_price'] else 0
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: REVERSAL CLOSE 🔁",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1113,14 +1136,17 @@ async def check_signals(symbol, timeframe='4h'):
                         'regime_dir': current_pos.get('regime_dir'), 'last_regime_bar': current_pos.get('last_regime_bar')
                     }
                     signal_cache[f"{symbol}_{timeframe}"] = current_pos
-                    await enqueue_message("\n".join([
+                    await enqueue_message("\n".join([s for s in [
                         f"{symbol} {timeframe}: BUY (LONG) 🚀",
-                        f"Sebep: {reason}{ret_meta_str}",
+                        f"Sebep: {reason}",
+                        (ret_meta_str if ret_meta_str else None),
+                        f"Bar Zamanı: {fmt_dt(bar_time)}",
+                        f"Gönderim: {fmt_dt(now)}",
                         f"Entry: {fmt_sym(symbol, entry_price)}",
                         f"SL: {fmt_sym(symbol, sl_price)}",
                         f"TP1: {fmt_sym(symbol, tp1_price)}",
                         f"TP2: {fmt_sym(symbol, tp2_price)}",
-                    ]))
+                    ] if s is not None]))
                     save_state()
         elif sell_condition and current_pos['signal'] != 'sell':
             cooldown_active = (
@@ -1158,14 +1184,17 @@ async def check_signals(symbol, timeframe='4h'):
                         'regime_dir': current_pos.get('regime_dir'), 'last_regime_bar': current_pos.get('last_regime_bar')
                     }
                     signal_cache[f"{symbol}_{timeframe}"] = current_pos
-                    await enqueue_message("\n".join([
+                    await enqueue_message("\n".join([s for s in [
                         f"{symbol} {timeframe}: SELL (SHORT) 📉",
-                        f"Sebep: {reason}{ret_meta_str}",
+                        f"Sebep: {reason}",
+                        (ret_meta_str if ret_meta_str else None),
+                        f"Bar Zamanı: {fmt_dt(bar_time)}",
+                        f"Gönderim: {fmt_dt(now)}",
                         f"Entry: {fmt_sym(symbol, entry_price)}",
                         f"SL: {fmt_sym(symbol, sl_price)}",
                         f"TP1: {fmt_sym(symbol, tp1_price)}",
                         f"TP2: {fmt_sym(symbol, tp2_price)}",
-                    ]))
+                    ] if s is not None]))
                     save_state()
         if current_pos['signal'] == 'buy':
             current_price = float(df['close'].iloc[-1]) if pd.notna(df['close'].iloc[-1]) else np.nan
@@ -1179,6 +1208,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['tp1_hit'] = True
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: TP1 Hit 🎯",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}",
                     f"P/L: {profit_percent:+.2f}% | %30 kapandı, Stop girişe çekildi.",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1191,6 +1222,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['tp2_hit'] = True
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: TP2 Hit 🎯🎯",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}",
                     f"P/L: {profit_percent:+.2f}% | %30 kapandı, kalan %40 açık.",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1201,6 +1234,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: EMA EXIT (LONG) 🔁",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1219,6 +1254,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: STOP LONG ⛔",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1245,6 +1282,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['tp1_hit'] = True
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: TP1 Hit 🎯",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Cur: {fmt_sym(symbol, current_price)} | TP1: {fmt_sym(symbol, current_pos['tp1_price'])}",
                     f"P/L: {profit_percent:+.2f}% | %30 kapandı, Stop girişe çekildi.",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1257,6 +1296,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['tp2_hit'] = True
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: TP2 Hit 🎯🎯",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Cur: {fmt_sym(symbol, current_price)} | TP2: {fmt_sym(symbol, current_pos['tp2_price'])}",
                     f"P/L: {profit_percent:+.2f}% | %30 kapandı, kalan %40 açık.",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1267,6 +1308,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: EMA EXIT (SHORT) 🔁",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
@@ -1285,6 +1328,8 @@ async def check_signals(symbol, timeframe='4h'):
                 current_pos['remaining_ratio'] = float(max(0.0, min(1.0, current_pos['remaining_ratio'])))
                 await enqueue_message("\n".join([
                     f"{symbol} {timeframe}: STOP SHORT ⛔",
+                    f"Bar Zamanı: {fmt_dt(bar_time)}",
+                    f"Gönderim: {fmt_dt(now)}",
                     f"Price: {fmt_sym(symbol, current_price)}",
                     f"P/L: {profit_percent:+.2f}%",
                     f"Kalan: %{current_pos['remaining_ratio']*100:.0f}"
