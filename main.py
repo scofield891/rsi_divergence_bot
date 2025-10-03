@@ -610,59 +610,92 @@ def retest_micro_checks_row(row, e30_val, side, atr_val, max_pen_k=0.25):
         return (pen <= max_pen_k * atr_val) and wick_dir_ok
 
 # --- Yeni Yardımcı Fonksiyonlar ---
-def retest_chain_ok(df: pd.DataFrame, side: str, touch_win: int = 4, reclaim_win: int = 4, use_shallow_pen: bool = True) -> (bool, dict):
+def retest_chain_ok(
+    df: pd.DataFrame,
+    side: str,
+    touch_win: int = 6,
+    reclaim_win: int = 6,
+    cross_idx: int | None = None,
+    confirm_two_bars: bool = True,
+    use_shallow_pen: bool = False  # senin tercihine göre kapalı
+) -> (bool, dict):
+    """
+    Şartlar (LONG):
+      1) cross_idx sonrası, t - cross_idx 8..RETEST_MAX_K_ADAPT aralığında
+      2) TOUCH: low <= ema30 <= high (cross'tan sonra)
+      3) RECLAIM: TOUCH'tan sonra ilk bar: yeşil & close>ema10
+      4) CONFIRM: RECLAIM'ten sonra ardışık 2 bar yeşil & close>ema10
+         (confirm fiyatı reclaim fiyatından büyük: c_now > c_reclaim)
+    SHORT için tam tersi.
+    """
     t = len(df) - 2
-    if t < 10:
-        return False, {"reason": "short_data"}
+    if t < 10 or cross_idx is None:
+        return False, {"reason": "no_cross_or_short_data"}
+
     close = df['close'].astype(float)
     open_ = df['open'].astype(float)
-    high = df['high'].astype(float)
-    low = df['low'].astype(float)
-    e10 = df['ema10'].astype(float)
-    e30 = df['ema30'].astype(float)
-    atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
-    atr_norm = clamp((atr_z - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
-    max_pen_k = 0.25 * (1.0 + 0.2 * atr_norm)
-    c_now, o_now = close.iloc[t], open_.iloc[t]
-    e10_now = e10.iloc[t]
+    high  = df['high'].astype(float)
+    low   = df['low'].astype(float)
+    e10   = df['ema10'].astype(float)
+    e30   = df['ema30'].astype(float)
+
+    # -- 1) pencere: cross sonrasında olmalı
+    if not (cross_idx < t):
+        return False, {"reason": "confirm_before_cross"}
+    k_since = t - cross_idx
+
+    # Üst sınırı check_signals'ta zaten tuttuk; yine de savunmacı olalım
+    if k_since < 8:
+        return False, {"reason": "too_early"}
+
+    # -- 4) CONFIRM: son 2 barın ikisi de yeşil (short: kırmızı) ve ema10 üstü/altı
+    c0, o0 = close.iloc[t], open_.iloc[t]
+    c1, o1 = close.iloc[t-1], open_.iloc[t-1]
+    e10_0, e10_1 = e10.iloc[t], e10.iloc[t-1]
+
     if side == "long":
-        if not (np.isfinite(c_now) and np.isfinite(o_now) and c_now > o_now and c_now > e10_now):
-            return False, {"reason": "confirm_fail"}
-        r_lo = max(0, t - reclaim_win); r_hi = t - 1
-        for r in range(r_hi, r_lo - 1, -1):
-            c_r, o_r, e10_r = close.iloc[r], open_.iloc[r], e10.iloc[r]
-            if not (c_r > o_r and c_r > e10_r):
-                continue
-            u_lo = max(0, r - touch_win); u_hi = r - 1
-            for u in range(u_hi, u_lo - 1, -1):
-                e30_u = e30.iloc[u]
-                if low.iloc[u] <= e30_u <= high.iloc[u]:
-                    atr_u = float(df['atr'].iloc[u]) if pd.notna(df['atr'].iloc[u]) else float('nan')
-                    if use_shallow_pen and np.isfinite(atr_u):
-                        if not retest_micro_checks_row(df.iloc[u], e30_u, side, atr_u, max_pen_k=max_pen_k):
-                            continue
-                    if c_now > c_r:
-                        return True, {"touch_idx": u, "reclaim_idx": r, "confirm_idx": t}
-        return False, {"reason": "chain_not_found"}
+        confirm_ok = (c1 > o1 and c1 > e10_1) and (c0 > o0 and c0 > e10_0) if confirm_two_bars \
+                     else (c0 > o0 and c0 > e10_0)
     else:
-        if not (np.isfinite(c_now) and np.isfinite(o_now) and c_now < o_now and c_now < e10_now):
-            return False, {"reason": "confirm_fail"}
-        r_lo = max(0, t - reclaim_win); r_hi = t - 1
-        for r in range(r_hi, r_lo - 1, -1):
-            c_r, o_r, e10_r = close.iloc[r], open_.iloc[r], e10.iloc[r]
-            if not (c_r < o_r and c_r < e10_r):
-                continue
-            u_lo = max(0, r - touch_win); u_hi = r - 1
-            for u in range(u_hi, u_lo - 1, -1):
-                e30_u = e30.iloc[u]
-                if low.iloc[u] <= e30_u <= high.iloc[u]:
-                    atr_u = float(df['atr'].iloc[u]) if pd.notna(df['atr'].iloc[u]) else float('nan')
-                    if use_shallow_pen and np.isfinite(atr_u):
-                        if not retest_micro_checks_row(df.iloc[u], e30_u, side, atr_u, max_pen_k=max_pen_k):
-                            continue
-                    if c_now < c_r:
-                        return True, {"touch_idx": u, "reclaim_idx": r, "confirm_idx": t}
-        return False, {"reason": "chain_not_found"}
+        confirm_ok = (c1 < o1 and c1 < e10_1) and (c0 < o0 and c0 < e10_0) if confirm_two_bars \
+                     else (c0 < o0 and c0 < e10_0)
+    if not confirm_ok:
+        return False, {"reason": "confirm_fail"}
+
+    # -- 3) RECLAIM: confirm'den bir bar önce
+    r = t-1
+    c_r, o_r, e10_r, e30_r = close.iloc[r], open_.iloc[r], e10.iloc[r], e30.iloc[r]
+    if side == "long":
+        if not (c_r > o_r and c_r > e10_r):
+            return False, {"reason": "reclaim_fail"}
+    else:
+        if not (c_r < o_r and c_r < e10_r):
+            return False, {"reason": "reclaim_fail"}
+
+    # -- 2) TOUCH: reclaim'den önceki 'touch_win' pencerede ema30'a temas, cross'tan sonra olmalı
+    u_lo = max(cross_idx + 1, r - touch_win)
+    u_hi = r - 1
+    touch_idx = None
+    for u in range(u_hi, u_lo - 1, -1):
+        e30_u = e30.iloc[u]
+        if low.iloc[u] <= e30_u <= high.iloc[u]:
+            if use_shallow_pen:
+                # (şu an kapalı, ama istenirse açılır)
+                atr_u = float(df['atr'].iloc[u]) if 'atr' in df.columns and pd.notna(df['atr'].iloc[u]) else np.nan
+                if not np.isfinite(atr_u) or not retest_micro_checks_row(df.iloc[u], e30_u, side, atr_u):
+                    continue
+            touch_idx = u
+            break
+    if touch_idx is None:
+        return False, {"reason": "no_touch"}
+
+    # -- Güç şartı: confirm fiyatı reclaim'den büyük/küçük (senin istediğin “strict” kural)
+    if side == "long" and not (c0 > c_r):
+        return False, {"reason": "confirm_not_stronger"}
+    if side == "short" and not (c0 < c_r):
+        return False, {"reason": "confirm_not_stronger"}
+
+    return True, {"touch_idx": touch_idx, "reclaim_idx": r, "confirm_idx": t, "k_since_cross": int(k_since)}
 
 # ========= ADX Rising =========
 def adx_rising_strict(df_adx: pd.Series) -> bool:
@@ -1015,15 +1048,44 @@ async def check_signals(symbol, timeframe='4h'):
                 f"adx={_adx:.1f} adx_n={adx_norm:.2f} "
                 f"atr_z={_atrz:.2f} atr_n={atr_norm:.2f}"
             )
-        e10 = df['ema10']; e30 = df['ema30']; e90 = df['ema90']
+        # --- 30/90 kesişmeleri
+        e10, e30, e90 = df['ema10'], df['ema30'], df['ema90']
         cross_up_3090 = (e30.shift(1) <= e90.shift(1)) & (e30 > e90)
         cross_dn_3090 = (e30.shift(1) >= e90.shift(1)) & (e30 < e90)
-        k_long = bars_since(cross_up_3090, idx=-2)
-        k_short = bars_since(cross_dn_3090, idx=-2)
-        in_retest_long = (k_long <= retest_limit_long)
-        in_retest_short = (k_short <= retest_limit_short)
-        ok_L, meta_L = entry_gate(df, side="long", atr_z=atr_z, in_retest_window=in_retest_long)
-        ok_S, meta_S = entry_gate(df, side="short", atr_z=atr_z, in_retest_window=in_retest_short)
+
+        def _last_true_idx(mask: pd.Series):
+            arr = mask.values
+            idxs = np.flatnonzero(arr)
+            return int(idxs[-1]) if idxs.size else None
+
+        last_up_idx  = _last_true_idx(cross_up_3090)
+        last_dn_idx  = _last_true_idx(cross_dn_3090)
+        t = len(df) - 2  # kapalı bar
+
+        # Adaptif üst sınır 12–32 arasında (senin son ayarın)
+        _rmax = 12 + 12*(1 - adx_norm) + 8*atr_norm
+        RETEST_MAX_K_ADAPT = int(round(clamp(_rmax, 12, 32)))
+
+        in_window_long  = last_up_idx is not None and (8 <= (t - last_up_idx) <= RETEST_MAX_K_ADAPT)
+        in_window_short = last_dn_idx is not None and (8 <= (t - last_dn_idx) <= RETEST_MAX_K_ADAPT)
+
+        # GATE yine eskisi gibi
+        ok_L, meta_L = entry_gate(df, side="long",  atr_z=atr_z, in_retest_window=in_window_long)
+        ok_S, meta_S = entry_gate(df, side="short", atr_z=atr_z, in_retest_window=in_window_short)
+
+        # *** YENİ: retest artık kesişme indeksine ve pencereye bağlı ***
+        retest_ok_L, retL_meta = False, {"reason": "no_cross"}
+        retest_ok_S, retS_meta = False, {"reason": "no_cross"}
+        if in_window_long:
+            retest_ok_L, retL_meta = retest_chain_ok(
+                df, side="long", touch_win=6, reclaim_win=6,
+                cross_idx=last_up_idx, confirm_two_bars=True, use_shallow_pen=False
+            )
+        if in_window_short:
+            retest_ok_S, retS_meta = retest_chain_ok(
+                df, side="short", touch_win=6, reclaim_win=6,
+                cross_idx=last_dn_idx, confirm_two_bars=True, use_shallow_pen=False
+            )
         gate_long, gate_short = ok_L, ok_S
         closed_candle = df.iloc[-2]
         is_green = (pd.notna(closed_candle['close']) and pd.notna(closed_candle['open']) and (closed_candle['close'] > closed_candle['open']))
@@ -1034,8 +1096,6 @@ async def check_signals(symbol, timeframe='4h'):
         strong_trend = (np.isfinite(adx_last) and adx_last >= 30) or (np.isfinite(chop_last) and chop_last <= 35)
         cond_lb_L = smi_open_green if not strong_trend else True
         cond_lb_S = smi_open_red if not strong_trend else True
-        retest_ok_L, retL_meta = retest_chain_ok(df, side="long", touch_win=6, reclaim_win=6, use_shallow_pen=False)
-        retest_ok_S, retS_meta = retest_chain_ok(df, side="short", touch_win=6, reclaim_win=6, use_shallow_pen=False)
         lookback_div = DIVERGENCE_LOOKBACK
         if len(df) < lookback_div + 5:
             div_bullish = div_bearish = False
@@ -1079,8 +1139,8 @@ async def check_signals(symbol, timeframe='4h'):
             ("froth_short", meta_S['froth_ok']),
             ("mom_long", meta_L['mom_ok']),
             ("mom_short", meta_S['mom_ok']),
-            ("k_window_L", in_retest_long),
-            ("k_window_S", in_retest_short),
+            ("k_window_L", in_window_long),
+            ("k_window_S", in_window_short),
         ]
         await record_crit_batch(criteria)
         if VERBOSE_LOG:
