@@ -38,8 +38,6 @@ ADX_THRESHOLD = 15
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
 USE_FROTH_GUARD = True
 FROTH_GUARD_K_ATR = 1.1
-# SIGNAL_MODE = "2of3" # Unused
-# REQUIRE_DIRECTION = False # Unused
 MAX_CONCURRENT_FETCHES = 4
 RATE_LIMIT_MS = 200
 N_SHARDS = 5
@@ -79,14 +77,19 @@ ADX_RISE_MIN_NET = 1.0
 ADX_RISE_POS_RATIO = 0.6
 ADX_RISE_EPS = 0.0
 ADX_RISE_USE_HYBRID = True
-USE_2BAR_LATE = True  # Late girişte two_bar_confirm kullanımı
+# --- RSI-EMA divergence ayarları ---
+RSI_LOW = 40
+RSI_HIGH = 60
+EMA_THRESHOLD = 0.5
+DIVERGENCE_LOOKBACK = 30
+DIVERGENCE_MIN_DISTANCE = 5
 # Yeni Config (entry_gate ve FakeFilter için)
 GATE_WEIGHTS = dict(
     TREND=float(os.getenv("W_TREND", 0.45)),
     DIR=float(os.getenv("W_DIR", 0.35)),
     NTX=float(os.getenv("W_NTX", 0.20))
 )
-FF_ACTIVE_PROFILE = os.getenv("FF_PROFILE", "normal")  # agresif|normal|garantici
+FF_ACTIVE_PROFILE = os.getenv("FF_PROFILE", "normal")
 CHOP_TREND_MAX = 38.0
 CHOP_RANGE_MIN = 61.0
 RSI_BAND_TREND = (46, 54)
@@ -197,6 +200,13 @@ def save_state():
 signal_cache = load_state()
 
 # ================== Util ==================
+def timeframe_to_minutes(tf: str) -> int:
+    tf = tf.lower().strip()
+    if tf.endswith('h'): return int(float(tf[:-1]) * 60)
+    if tf.endswith('m'): return int(float(tf[:-1]))
+    if tf.endswith('d'): return int(float(tf[:-1]) * 1440)
+    return 240  # default 4h
+
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
@@ -256,6 +266,59 @@ async def record_crit_batch(items):
             crit_total_counts[name] += 1
             if not passed:
                 crit_false_counts[name] += 1
+
+# --- RSI-EMA divergence yardımcıları ---
+def calculate_rsi_ema(rsi, ema_length=14):
+    ema = np.zeros_like(rsi, dtype=np.float64)
+    if len(rsi) < ema_length:
+        return ema
+    ema[ema_length-1] = np.mean(rsi[:ema_length])
+    alpha = 2 / (ema_length + 1)
+    for i in range(ema_length, len(rsi)):
+        ema[i] = (rsi[i] * alpha) + (ema[i-1] * (1 - alpha))
+    return ema
+
+def find_local_extrema(arr, order=3):
+    highs, lows = [], []
+    for i in range(order, len(arr) - order):
+        left = arr[i-order:i]
+        right = arr[i+1:i+order+1]
+        if arr[i] > np.max(np.concatenate((left, right))):
+            highs.append(i)
+        if arr[i] < np.min(np.concatenate((left, right))):
+            lows.append(i)
+    return np.array(highs), np.array(lows)
+
+def detect_rsiema_divergence_core(price_slice: np.ndarray,
+                                  rsiema_slice: np.ndarray,
+                                  min_distance: int = DIVERGENCE_MIN_DISTANCE):
+    """Küçük koddaki koşullar birebir:
+       bullish: price LL & rsiema HL & rsiema[last_low] < RSI_LOW
+       bearish: price HH & rsiema LH & rsiema[last_high] > RSI_HIGH
+    """
+    price_highs, price_lows = find_local_extrema(price_slice, order=3)
+    bullish = False
+    bearish = False
+
+    if len(price_lows) >= 2:
+        last_low = price_lows[-1]
+        prev_low = price_lows[-2]
+        if (last_low - prev_low) >= min_distance:
+            if price_slice[last_low] < price_slice[prev_low] and \
+               rsiema_slice[last_low] > (rsiema_slice[prev_low] + EMA_THRESHOLD) and \
+               rsiema_slice[last_low] < RSI_LOW:
+                bullish = True
+
+    if len(price_highs) >= 2:
+        last_high = price_highs[-1]
+        prev_high = price_highs[-2]
+        if (last_high - prev_high) >= min_distance:
+            if price_slice[last_high] > price_slice[prev_high] and \
+               rsiema_slice[last_high] < (rsiema_slice[prev_high] - EMA_THRESHOLD) and \
+               rsiema_slice[last_high] > RSI_HIGH:
+                bearish = True
+
+    return bullish, bearish
 
 # ================== Mesaj Kuyruğu ==================
 async def enqueue_message(text: str):
@@ -494,6 +557,10 @@ def calculate_indicators(df, symbol, timeframe):
     df = calculate_obv_and_volma(df, vol_ma_window=20, spike_window=60)
     df = calc_ntx(df, period=NTX_PERIOD, k_eff=NTX_K_EFF)
     df['rsi'] = pd.Series(calculate_rsi(df['close'].values.astype(np.float64), period=14), index=df.index)
+    df['rsi_ema'] = pd.Series(
+        calculate_rsi_ema(df['rsi'].values.astype(np.float64), ema_length=14),
+        index=df.index
+    )
     df = choppiness_index(df, n=14, smooth=3)
     return df, adx_condition, di_condition_long, di_condition_short
 
@@ -544,14 +611,6 @@ def retest_micro_checks_row(row, e30_val, side, atr_val, max_pen_k=0.25):
 
 # --- Yeni Yardımcı Fonksiyonlar ---
 def retest_chain_ok(df: pd.DataFrame, side: str, touch_win: int = 4, reclaim_win: int = 4, use_shallow_pen: bool = True) -> (bool, dict):
-    """
-    Confirm = şu anki kapalı mum (t=-2).
-    Long:
-      1) Touch: E30'a temas (fitil/gövde) — confirm'den ≤4 bar önce
-      2) Reclaim: yeşil ve EMA10 üstü kapanış — touch'tan ≤4 bar sonra ve confirm'den önce
-      3) Confirm: yeşil, EMA10 üstü ve kapanış > reclaim kapanışı
-    Short için tersine.
-    """
     t = len(df) - 2
     if t < 10:
         return False, {"reason": "short_data"}
@@ -563,41 +622,35 @@ def retest_chain_ok(df: pd.DataFrame, side: str, touch_win: int = 4, reclaim_win
     e30 = df['ema30'].astype(float)
     atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
     atr_norm = clamp((atr_z - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
-    max_pen_k = 0.25 * (1.0 + 0.2 * atr_norm)  # Dynamic max_pen_k: looser in trend, tighter in flat
+    max_pen_k = 0.25 * (1.0 + 0.2 * atr_norm)
     c_now, o_now = close.iloc[t], open_.iloc[t]
     e10_now = e10.iloc[t]
     if side == "long":
-        # Confirm: yeşil + EMA10 üstü
         if not (np.isfinite(c_now) and np.isfinite(o_now) and c_now > o_now and c_now > e10_now):
             return False, {"reason": "confirm_fail"}
-        # Reclaim aralığı: confirm'den geriye 1..4 bar
         r_lo = max(0, t - reclaim_win); r_hi = t - 1
         for r in range(r_hi, r_lo - 1, -1):
             c_r, o_r, e10_r = close.iloc[r], open_.iloc[r], e10.iloc[r]
-            if not (c_r > o_r and c_r > e10_r):  # yeşil + EMA10 üstü
+            if not (c_r > o_r and c_r > e10_r):
                 continue
-            # Touch: reclaim'den 1..4 bar önce E30'a temas
             u_lo = max(0, r - touch_win); u_hi = r - 1
             for u in range(u_hi, u_lo - 1, -1):
                 e30_u = e30.iloc[u]
                 if low.iloc[u] <= e30_u <= high.iloc[u]:
-                    # u barında kontrol (ATR de u barından)
                     atr_u = float(df['atr'].iloc[u]) if pd.notna(df['atr'].iloc[u]) else float('nan')
                     if use_shallow_pen and np.isfinite(atr_u):
                         if not retest_micro_checks_row(df.iloc[u], e30_u, side, atr_u, max_pen_k=max_pen_k):
                             continue
-                    # Confirm, reclaim'den yüksek olmalı
                     if c_now > c_r:
                         return True, {"touch_idx": u, "reclaim_idx": r, "confirm_idx": t}
         return False, {"reason": "chain_not_found"}
     else:
-        # Short confirm: kırmızı + EMA10 altı
         if not (np.isfinite(c_now) and np.isfinite(o_now) and c_now < o_now and c_now < e10_now):
             return False, {"reason": "confirm_fail"}
         r_lo = max(0, t - reclaim_win); r_hi = t - 1
         for r in range(r_hi, r_lo - 1, -1):
             c_r, o_r, e10_r = close.iloc[r], open_.iloc[r], e10.iloc[r]
-            if not (c_r < o_r and c_r < e10_r):  # kırmızı + EMA10 altı
+            if not (c_r < o_r and c_r < e10_r):
                 continue
             u_lo = max(0, r - touch_win); u_hi = r - 1
             for u in range(u_hi, u_lo - 1, -1):
@@ -802,7 +855,7 @@ def entry_gate(df: pd.DataFrame, side: str, atr_z: float, in_retest_window: bool
              GATE_WEIGHTS["DIR"]*s_dir +
              GATE_WEIGHTS["NTX"]*s_ntx)
     if ema_slope_ok(df, side, use_atr_norm=True, min_norm=0.08):
-        score += 0.05  # Bonus for ATR-normalized EMA slope
+        score += 0.05
     thr_gate = compute_gate_threshold(adx_last, chop_last)
     pass_soft = (score >= thr_gate)
     if np.isfinite(adx_last) and 18.0 <= adx_last <= 25.0:
@@ -939,7 +992,6 @@ async def check_signals(symbol, timeframe='4h'):
             await mark_status(symbol, "skip", "invalid_atr")
             logger.warning(f"Geçersiz ATR ({symbol} {timeframe}), skip.")
             return
-        # --- ADAPTİF PENCERE AYARI (ADX & ATR_z) ---
         adx_last = float(df['adx'].iloc[-2]) if pd.notna(df['adx'].iloc[-2]) else np.nan
         atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
         _adx = float(adx_last) if np.isfinite(adx_last) else 0.0
@@ -947,21 +999,14 @@ async def check_signals(symbol, timeframe='4h'):
         adx_norm = clamp((_adx - 21.0) / 15.0, 0.0, 1.0)
         atr_norm = clamp((_atrz - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
         _rmax = 12 + 6*(1 - adx_norm) + 2*atr_norm
-        _emin = _rmax + 1
-        _emax = _emin + 6 + 2*atr_norm
         RETEST_MAX_K_ADAPT = int(round(clamp(_rmax, 8, 24)))
-        EMA_LATE_MIN_K_ADAPT = int(round(clamp(_emin, 9, 26)))
-        EMA_LATE_MAX_K_ADAPT = int(round(clamp(_emax, 12, 32)))
         retest_limit_long = retest_limit_short = RETEST_MAX_K_ADAPT
-        ema_min_k = EMA_LATE_MIN_K_ADAPT
-        ema_max_k = EMA_LATE_MAX_K_ADAPT
         if VERBOSE_LOG:
             logger.info(
                 f"{symbol} {timeframe} ADAPT k: retest≤{retest_limit_long}, "
-                f"ema=[{ema_min_k},{ema_max_k}] adx={_adx:.1f} adx_n={adx_norm:.2f} "
+                f"adx={_adx:.1f} adx_n={adx_norm:.2f} "
                 f"atr_z={_atrz:.2f} atr_n={atr_norm:.2f}"
             )
-        # --- 30/90 pencere sayaçları (k) ---
         e10 = df['ema10']; e30 = df['ema30']; e90 = df['ema90']
         cross_up_3090 = (e30.shift(1) <= e90.shift(1)) & (e30 > e90)
         cross_dn_3090 = (e30.shift(1) >= e90.shift(1)) & (e30 < e90)
@@ -969,47 +1014,36 @@ async def check_signals(symbol, timeframe='4h'):
         k_short = bars_since(cross_dn_3090, idx=-2)
         in_retest_long = (k_long <= retest_limit_long)
         in_retest_short = (k_short <= retest_limit_short)
-        # --- Yeni Entry Gate (skor+veto) ---
         ok_L, meta_L = entry_gate(df, side="long", atr_z=atr_z, in_retest_window=in_retest_long)
         ok_S, meta_S = entry_gate(df, side="short", atr_z=atr_z, in_retest_window=in_retest_short)
         gate_long, gate_short = ok_L, ok_S
-        # --- Yapısal ortak şartlar (kapanış rengi) ---
         closed_candle = df.iloc[-2]
         is_green = (pd.notna(closed_candle['close']) and pd.notna(closed_candle['open']) and (closed_candle['close'] > closed_candle['open']))
         is_red = (pd.notna(closed_candle['close']) and pd.notna(closed_candle['open']) and (closed_candle['close'] < closed_candle['open']))
-        smi_open_green = df['lb_open_green'].iloc[-2] if 'lb_open_green' in df.columns and pd.notna(df['lb_open_green'].iloc[-2]) else False
-        smi_open_red = df['lb_open_red'].iloc[-2] if 'lb_open_red' in df.columns and pd.notna(df['lb_open_red'].iloc[-2]) else False
+        smi_open_green = bool(df['lb_open_green'].iloc[-2]) if 'lb_open_green' in df.columns and pd.notna(df['lb_open_green'].iloc[-2]) else False
+        smi_open_red = bool(df['lb_open_red'].iloc[-2]) if 'lb_open_red' in df.columns and pd.notna(df['lb_open_red'].iloc[-2]) else False
         chop_last = float(df['chop'].iloc[-2]) if 'chop' in df.columns and pd.notna(df['chop'].iloc[-2]) else np.nan
         strong_trend = (np.isfinite(adx_last) and adx_last >= 30) or (np.isfinite(chop_last) and chop_last <= 35)
         cond_lb_L = smi_open_green if not strong_trend else True
         cond_lb_S = smi_open_red if not strong_trend else True
-        # --- Yeni Retest Zinciri (4 bar pencereleri) ---
         retest_ok_L, retL_meta = retest_chain_ok(df, side="long", touch_win=4, reclaim_win=4, use_shallow_pen=True)
         retest_ok_S, retS_meta = retest_chain_ok(df, side="short", touch_win=4, reclaim_win=4, use_shallow_pen=True)
-        # --- Late (EMA geç) (isim standardizasyonu) ---
-        window_ema_long = (ema_min_k <= k_long <= ema_max_k)
-        window_ema_short = (ema_min_k <= k_short <= ema_max_k)
-        ema_late_L = (
-            window_ema_long
-            and (e10.iloc[-2] > e30.iloc[-2] > e90.iloc[-2])
-            and (closed_candle['close'] > e30.iloc[-2])
-            and is_green
-            and cond_lb_L
-            and gate_long
-            and (two_bar_confirm(df, side="long") if USE_2BAR_LATE else True)
-        )
-        ema_late_S = (
-            window_ema_short
-            and (e10.iloc[-2] < e30.iloc[-2] < e90.iloc[-2])
-            and (closed_candle['close'] < e30.iloc[-2])
-            and is_red
-            and cond_lb_S
-            and gate_short
-            and (two_bar_confirm(df, side="short") if USE_2BAR_LATE else True)
-        )
-        # --- Nihai giriş tetikleyicileri ---
-        buy_condition = gate_long and (retest_ok_L or ema_late_L)
-        sell_condition = gate_short and (retest_ok_S or ema_late_S)
+        lookback_div = DIVERGENCE_LOOKBACK
+        if len(df) < lookback_div + 5:  # Güvenli pay
+            div_bullish = div_bearish = False
+        else:
+            price_slice = df['close'].astype(float).values[-lookback_div-1:-1]
+            rsiema_slice = df['rsi_ema'].astype(float).values[-lookback_div-1:-1]
+            div_bullish, div_bearish = detect_rsiema_divergence_core(
+                price_slice, rsiema_slice, min_distance=DIVERGENCE_MIN_DISTANCE
+            )
+        close_last = float(df['close'].iloc[-2])
+        e10_last = float(df['ema10'].iloc[-2])
+        e30_last = float(df['ema30'].iloc[-2])
+        div_long_ok = (div_bullish and (close_last > e10_last) and (close_last > e30_last) and cond_lb_L and is_green)
+        div_short_ok = (div_bearish and (close_last < e10_last) and (close_last < e30_last) and cond_lb_S and is_red)
+        buy_condition = gate_long and (retest_ok_L or div_long_ok)
+        sell_condition = gate_short and (retest_ok_S or div_short_ok)
         reason = ""
         ret_meta_str = ""
         if buy_condition:
@@ -1017,37 +1051,36 @@ async def check_signals(symbol, timeframe='4h'):
                 reason = "Retest-Zincir"
                 ret_meta_str = retest_meta_human(df, retL_meta)
             else:
-                reason = "Late (EMA)"
+                reason = "RSI-EMA Divergence (BULLISH)"
         elif sell_condition:
             if retest_ok_S:
                 reason = "Retest-Zincir"
                 ret_meta_str = retest_meta_human(df, retS_meta)
             else:
-                reason = "Late (EMA)"
-        # --- Kriter Sayacı ---
+                reason = "RSI-EMA Divergence (BEARISH)"
         criteria = [
             ("gate_long", gate_long),
             ("gate_short", gate_short),
             ("retest_chain_L", retest_ok_L),
             ("retest_chain_S", retest_ok_S),
-            ("ema_late_L", ema_late_L),
-            ("ema_late_S", ema_late_S),
+            ("div_long_ok", div_long_ok),
+            ("div_short_ok", div_short_ok),
             ("fk_long", meta_L['fk_ok']),
             ("fk_short", meta_S['fk_ok']),
             ("froth_long", meta_L['froth_ok']),
             ("froth_short", meta_S['froth_ok']),
             ("mom_long", meta_L['mom_ok']),
             ("mom_short", meta_S['mom_ok']),
-            ("k_window_L", in_retest_long or window_ema_long),
-            ("k_window_S", in_retest_short or window_ema_short),
+            ("k_window_L", in_retest_long),
+            ("k_window_S", in_retest_short),
         ]
         await record_crit_batch(criteria)
         if VERBOSE_LOG:
             logger.info(f"{symbol} {timeframe} RETEST_META L:{retL_meta} S:{retS_meta}")
             logger.info(
                 f"{symbol} {timeframe} | GATE L:{gate_long} S:{gate_short} "
-                f"| buy:{buy_condition}({ 'retest' if retest_ok_L else 'late' if ema_late_L else '-' }) "
-                f"| sell:{sell_condition}({ 'retest' if retest_ok_S else 'late' if ema_late_S else '-' }) "
+                f"| buy:{buy_condition}({ 'retest' if retest_ok_L else 'divergence' if div_long_ok else '-' }) "
+                f"| sell:{sell_condition}({ 'retest' if retest_ok_S else 'divergence' if div_short_ok else '-' }) "
                 f"| scoreL={meta_L['score']:.3f}/{meta_L['thr']:.2f} fk={meta_L['fk_ok']} froth={meta_L['froth_ok']} mom={meta_L['mom_ok']}"
             )
         if buy_condition and sell_condition:
@@ -1099,9 +1132,11 @@ async def check_signals(symbol, timeframe='4h'):
                 save_state()
                 current_pos = signal_cache[f"{symbol}_{timeframe}"]
         if buy_condition and current_pos['signal'] != 'buy':
+            tf_minutes = timeframe_to_minutes(timeframe)
+            cooldown_min = max(COOLDOWN_MINUTES, tf_minutes)
             cooldown_active = (
                 current_pos['last_signal_time'] and
-                (now - current_pos['last_signal_time']) < timedelta(minutes=COOLDOWN_MINUTES) and
+                (now - current_pos['last_signal_time']) < timedelta(minutes=cooldown_min) and
                 (APPLY_COOLDOWN_BOTH_DIRECTIONS or current_pos['last_signal_type'] == 'buy')
             )
             if cooldown_active or current_pos.get('last_bar_time') == bar_time:
@@ -1145,9 +1180,11 @@ async def check_signals(symbol, timeframe='4h'):
                     ]))
                     save_state()
         elif sell_condition and current_pos['signal'] != 'sell':
+            tf_minutes = timeframe_to_minutes(timeframe)
+            cooldown_min = max(COOLDOWN_MINUTES, tf_minutes)
             cooldown_active = (
                 current_pos['last_signal_time'] and
-                (now - current_pos['last_signal_time']) < timedelta(minutes=COOLDOWN_MINUTES) and
+                (now - current_pos['last_signal_time']) < timedelta(minutes=cooldown_min) and
                 (APPLY_COOLDOWN_BOTH_DIRECTIONS or current_pos['last_signal_type'] == 'sell')
             )
             if cooldown_active or current_pos.get('last_bar_time') == bar_time:
