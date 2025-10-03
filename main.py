@@ -81,13 +81,13 @@ ADX_RISE_USE_HYBRID = True
 RSI_LOW = 40
 RSI_HIGH = 60
 EMA_THRESHOLD = 0.5
-DIVERGENCE_LOOKBACK = 30
+DIVERGENCE_LOOKBACK = 40
 DIVERGENCE_MIN_DISTANCE = 5
-# Yeni Config (entry_gate ve FakeFilter için)
+# --- Gate skor ağırlıkları (trend↓, yön↑) ---
 GATE_WEIGHTS = dict(
-    TREND=float(os.getenv("W_TREND", 0.45)),
-    DIR=float(os.getenv("W_DIR", 0.35)),
-    NTX=float(os.getenv("W_NTX", 0.20))
+    TREND=float(os.getenv("W_TREND", 0.40)),  # 0.45 -> 0.40
+    DIR=float(os.getenv("W_DIR", 0.40)),      # 0.35 -> 0.40
+    NTX=float(os.getenv("W_NTX", 0.20))       # sabit
 )
 FF_ACTIVE_PROFILE = os.getenv("FF_PROFILE", "normal")
 CHOP_TREND_MAX = 38.0
@@ -803,11 +803,14 @@ def ntx_soft_score(df: pd.DataFrame, atr_z: float) -> float:
     else: return 0.5 + clamp(((val-thr)/(100-thr+1e-9))*0.5, 0.0, 0.5)
 
 def compute_gate_threshold(adx_last: float, chop_last: float) -> float:
+    # Trend rejimi: daha düşük eşik
     if (np.isfinite(adx_last) and adx_last >= 28.0) or (np.isfinite(chop_last) and chop_last <= CHOP_TREND_MAX):
-        return float(os.getenv("THR_TREND", 0.60))
+        return float(os.getenv("THR_TREND", 0.55))  # 0.60 -> 0.55
+    # Range/flat rejim: daha düşük ama en yüksek eşik
     if (np.isfinite(adx_last) and adx_last <= 20.0) or (np.isfinite(chop_last) and chop_last >= CHOP_RANGE_MIN):
-        return float(os.getenv("THR_FLAT", 0.72))
-    return float(os.getenv("THR_NORM", 0.66))
+        return float(os.getenv("THR_FLAT", 0.67))   # 0.72 -> 0.67
+    # Normal rejim
+    return float(os.getenv("THR_NORM", 0.61))       # 0.66 -> 0.61
 
 def rsi_band_for_regime(adx_last: float, chop_last: float):
     if (np.isfinite(adx_last) and adx_last >= 28.0) or (np.isfinite(chop_last) and chop_last <= CHOP_TREND_MAX):
@@ -858,15 +861,16 @@ def entry_gate(df: pd.DataFrame, side: str, atr_z: float, in_retest_window: bool
         score += 0.05
     thr_gate = compute_gate_threshold(adx_last, chop_last)
     pass_soft = (score >= thr_gate)
+    # DI ufak bonus (18-25 bandı)
     if np.isfinite(adx_last) and 18.0 <= adx_last <= 25.0:
-        di_plus = float(df['di_plus'].iloc[-2]) if pd.notna(df['di_plus'].iloc[-2]) else np.nan
+        di_plus  = float(df['di_plus'].iloc[-2])  if pd.notna(df['di_plus'].iloc[-2])  else np.nan
         di_minus = float(df['di_minus'].iloc[-2]) if pd.notna(df['di_minus'].iloc[-2]) else np.nan
-        if side=="long" and np.isfinite(di_plus) and np.isfinite(di_minus) and di_plus>di_minus:
-            score += 0.05
-        if side=="short" and np.isfinite(di_plus) and np.isfinite(di_minus) and di_plus<di_minus:
-            score += 0.05
+        if side=="long"  and np.isfinite(di_plus) and np.isfinite(di_minus) and di_plus>di_minus: score += 0.05
+        if side=="short" and np.isfinite(di_plus) and np.isfinite(di_minus) and di_plus<di_minus: score += 0.05
         pass_soft = (score >= thr_gate)
-    borderline = (0.65 <= score < 0.72)
+    # Borderline: thr kapısının hemen yanı
+    borderline = (score >= (thr_gate - 0.02)) and (score < thr_gate + 0.03)
+    # Rejim uyumluysa küçük bonus
     if borderline and regime_ok_strict(df, side):
         score += 0.02
         pass_soft = (score >= thr_gate)
@@ -874,9 +878,12 @@ def entry_gate(df: pd.DataFrame, side: str, atr_z: float, in_retest_window: bool
     froth_ok = froth_ok_blended(df, base_K=FROTH_GUARD_K_ATR, atr_z=atr_z)
     rsi_band = rsi_band_for_regime(adx_last, chop_last)
     mom_ok = momentum_pass(df, side=side, band=rsi_band)
-    if borderline and not regime_ok_strict(df, side):
+    # Rejim uyumsuz + borderline ise sadece retest penceresi YOKSA fail
+    if borderline and (not regime_ok_strict(df, side)) and (not in_retest_window):
         pass_soft = False
-    if pass_soft and ntx_fatigue(df) and not in_retest_window:
+    # NTX fatigue: sadece no-squeeze ortamda ve retest penceresi YOKKEN devrede
+    sqz_on = bool(df['lb_sqz_on'].iloc[-2]) if 'lb_sqz_on' in df.columns and pd.notna(df['lb_sqz_on'].iloc[-2]) else False
+    if pass_soft and ntx_fatigue(df) and (not in_retest_window) and (not sqz_on):
         pass_soft = False
     passed = pass_soft and fk_ok and froth_ok and mom_ok
     meta = dict(
@@ -998,8 +1005,9 @@ async def check_signals(symbol, timeframe='4h'):
         _atrz = float(atr_z) if np.isfinite(atr_z) else 0.0
         adx_norm = clamp((_adx - 21.0) / 15.0, 0.0, 1.0)
         atr_norm = clamp((_atrz - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
-        _rmax = 12 + 6*(1 - adx_norm) + 2*atr_norm
-        RETEST_MAX_K_ADAPT = int(round(clamp(_rmax, 8, 24)))
+        # Üst sınır 32 olacak şekilde yeniden ölçekle (min 12, max 32)
+        _rmax = 12 + 12*(1 - adx_norm) + 8*atr_norm
+        RETEST_MAX_K_ADAPT = int(round(clamp(_rmax, 12, 32)))
         retest_limit_long = retest_limit_short = RETEST_MAX_K_ADAPT
         if VERBOSE_LOG:
             logger.info(
@@ -1026,10 +1034,10 @@ async def check_signals(symbol, timeframe='4h'):
         strong_trend = (np.isfinite(adx_last) and adx_last >= 30) or (np.isfinite(chop_last) and chop_last <= 35)
         cond_lb_L = smi_open_green if not strong_trend else True
         cond_lb_S = smi_open_red if not strong_trend else True
-        retest_ok_L, retL_meta = retest_chain_ok(df, side="long", touch_win=4, reclaim_win=4, use_shallow_pen=True)
-        retest_ok_S, retS_meta = retest_chain_ok(df, side="short", touch_win=4, reclaim_win=4, use_shallow_pen=True)
+        retest_ok_L, retL_meta = retest_chain_ok(df, side="long", touch_win=6, reclaim_win=6, use_shallow_pen=False)
+        retest_ok_S, retS_meta = retest_chain_ok(df, side="short", touch_win=6, reclaim_win=6, use_shallow_pen=False)
         lookback_div = DIVERGENCE_LOOKBACK
-        if len(df) < lookback_div + 5:  # Güvenli pay
+        if len(df) < lookback_div + 5:
             div_bullish = div_bearish = False
         else:
             price_slice = df['close'].astype(float).values[-lookback_div-1:-1]
