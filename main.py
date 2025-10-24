@@ -37,7 +37,7 @@ ADX_PERIOD = 14
 ADX_THRESHOLD = 15
 APPLY_COOLDOWN_BOTH_DIRECTIONS = True
 USE_FROTH_GUARD = True
-FROTH_GUARD_K_ATR = 1.1
+FROTH_GUARD_K_ATR = float(os.getenv("FROTH_K_ATR", 1.1))
 MAX_CONCURRENT_FETCHES = 4
 RATE_LIMIT_MS = 200
 N_SHARDS = 5
@@ -103,6 +103,10 @@ FF_PROFILES = {
     "garantici": dict(FF_BODY_MIN=0.52, FF_UPWICK_MAX=0.28, FF_DNWICK_MAX=0.28, FF_BB_MIN=0.30,
                       VOL_MA_RATIO_MIN=1.10, VOL_Z_MIN=1.20, OBV_SLOPE_WIN=4, MIN_DVOL_USD=250_000)
 }
+
+THR_TREND = float(os.getenv("THR_TREND", 0.55))
+THR_NORM = float(os.getenv("THR_NORM", 0.61))
+THR_FLAT = float(os.getenv("THR_FLAT", 0.67))
 
 # ================== Logging ==================
 logger = logging.getLogger()
@@ -192,8 +196,10 @@ def load_state():
 
 def save_state():
     try:
-        with open(STATE_FILE, 'w') as f:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, 'w') as f:
             json.dump(signal_cache, f, default=_json_default)
+        os.replace(tmp, STATE_FILE)  # atomic on POSIX & modern Windows
     except Exception as e:
         logger.warning(f"State kaydedilemedi: {e}")
 
@@ -206,6 +212,11 @@ def timeframe_to_minutes(tf: str) -> int:
     if tf.endswith('m'): return int(float(tf[:-1]))
     if tf.endswith('d'): return int(float(tf[:-1]) * 1440)
     return 240  # default 4h
+
+def cooldown_for_new_symbol(tf: str) -> int:
+    m = timeframe_to_minutes(tf)
+    # 30m -> 60 dk, 1h -> 120 dk, 4h -> 180 dk, 1d -> 360 dk gibi basit ölçek
+    return int(clamp(m * 2, 60, 360))
 
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
@@ -320,6 +331,114 @@ def detect_rsiema_divergence_core(price_slice: np.ndarray,
 
     return bullish, bearish
 
+# --- Dip–Tepe 4H v2.0 ---
+def dip_tepe_signals(
+    df: pd.DataFrame,
+    atr_len: int = 14,
+    kATR: float = 1.25,
+    minSepBars: int = 8,
+    brkLen: int = 4,
+    brkBufferATR: float = 0.12,
+    seqWinBars: int = 3,
+    bodyMinFrac: float = 0.30
+) -> tuple[bool, bool]:
+    """Pine 'Dip–Tepe 4H v2.0' ile uyumlu: majorBottomSignal, majorTopSignal (son kapalı bar için)"""
+    if len(df) < max(atr_len, brkLen) + 5:
+        return False, False
+
+    # Türevler
+    atr = df['atr'] if 'atr' in df.columns else ensure_atr(df.copy(), period=atr_len)['atr']
+    rng = (df['high'] - df['low']).astype(float).clip(lower=1e-10)
+    body = (df['close'] - df['open']).abs().astype(float)
+    bodyFrac = (body / rng)
+
+    # State
+    dir_ = None
+    extremePx = np.nan
+    extremeBar = None
+    lastSwingBar = None
+
+    majorTop = np.zeros(len(df), dtype=bool)
+    majorBot = np.zeros(len(df), dtype=bool)
+
+    # init
+    if np.isnan(extremePx):
+        dir_ = +1 if df['close'].iloc[1] >= df['close'].iloc[0] else -1
+        extremePx = df['high'].iloc[1] if dir_ == +1 else df['low'].iloc[1]
+        extremeBar = 1
+
+    # yürüt
+    for i in range(2, len(df)):
+        h, l, c, o = float(df['high'].iloc[i]), float(df['low'].iloc[i]), float(df['close'].iloc[i]), float(df['open'].iloc[i])
+        # extreme canlı güncelle
+        if dir_ == +1 and h > extremePx:
+            extremePx, extremeBar = h, i
+        if dir_ == -1 and l < extremePx:
+            extremePx, extremeBar = l, i
+
+        # Mod A (ATR dönüş + gövde filtresi)
+        bearRevA_raw = (dir_ == +1) and (c <= (extremePx - kATR * float(atr.iloc[i])))
+        bullRevA_raw = (dir_ == -1) and (c >= (extremePx + kATR * float(atr.iloc[i])))
+        bearRevA = bearRevA_raw and (c < o) and (float(bodyFrac.iloc[i]) >= bodyMinFrac)
+        bullRevA = bullRevA_raw and (c > o) and (float(bodyFrac.iloc[i]) >= bodyMinFrac)
+
+        # Mod B (mevcut bar hariç) → i'yi dışlayarak bak
+        if i - 1 >= 1 + brkLen:
+            lowestPrev  = np.min(df['low'].iloc[i-1-brkLen+1:i].values)
+            highestPrev = np.max(df['high'].iloc[i-1-brkLen+1:i].values)
+        else:
+            lowestPrev = np.min(df['low'].iloc[:i].values)
+            highestPrev = np.max(df['high'].iloc[:i].values)
+
+        downBuf = lowestPrev  - brkBufferATR * float(atr.iloc[i])
+        upBuf   = highestPrev + brkBufferATR * float(atr.iloc[i])
+        strDown = c <= downBuf
+        strUp   = c >= upBuf
+
+        bearA, bearB = bearRevA, strDown
+        bullA, bullB = bullRevA, strUp
+
+        # barssince taklidi
+        def bars_since(mask_series_end_values: list[bool], win: int) -> int:
+            # sondan geriye maske içinde ilk True'a kadar
+            for j in range(1, win+2):
+                if j <= len(mask_series_end_values) and mask_series_end_values[-j]:
+                    return j-1
+            return 10_000
+
+        # seqWinBars penceresinde A→B veya B→A
+        # basitçe: i içindeki durum & son win kadar önceki karşı olay olmuş mu
+        bs_bearA = bars_since([bearA], seqWinBars)
+        bs_bearB = bars_since([bearB], seqWinBars)
+        bs_bullA = bars_since([bullA], seqWinBars)
+        bs_bullB = bars_since([bullB], seqWinBars)
+
+        bearAB_seq = (bearA and (bs_bearB <= seqWinBars)) or (bearB and (bs_bearA <= seqWinBars))
+        bullAB_seq = (bullA and (bs_bullB <= seqWinBars)) or (bullB and (bs_bullA <= seqWinBars))
+
+        bearFinal = bearAB_seq
+        bullFinal = bullAB_seq
+
+        enoughSep = (lastSwingBar is None) or ((i - (lastSwingBar or 0)) >= minSepBars)
+        majorTopSignal = bool(bearFinal and enoughSep)
+        majorBottomSignal = bool(bullFinal and enoughSep)
+
+        if majorTopSignal:
+            lastSwingBar = i
+            dir_ = -1
+            extremePx = l
+            extremeBar = i
+            majorTop[i] = True
+        elif majorBottomSignal:
+            lastSwingBar = i
+            dir_ = +1
+            extremePx = h
+            extremeBar = i
+            majorBot[i] = True
+
+    # son kapalı bar (i = len-2)
+    return bool(majorBot[-2]), bool(majorTop[-2])
+
 # ================== Mesaj Kuyruğu ==================
 async def enqueue_message(text: str):
     try:
@@ -356,7 +475,7 @@ async def fetch_ohlcv_async(symbol, timeframe, limit):
                     _last_call_ts = asyncio.get_event_loop().time()
                 return await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
         except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
-            backoff = (2 ** attempt) * 1.5
+            backoff = (2 ** attempt) * 1.5 * (0.85 + 0.30 * random.random())
             logger.warning(f"Rate limit {symbol} {timeframe}, backoff {backoff:.1f}s ({e.__class__.__name__})")
             await asyncio.sleep(backoff)
         except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
@@ -652,13 +771,18 @@ def retest_chain_ok(
     c0, o0 = close.iloc[t], open_.iloc[t]
     c1, o1 = close.iloc[t-1], open_.iloc[t-1]
     e10_0, e10_1 = e10.iloc[t], e10.iloc[t-1]
+    e30_0, e30_1 = e30.iloc[t], e30.iloc[t-1]
 
     if side == "long":
-        confirm_ok = (c1 > o1 and c1 > e10_1) and (c0 > o0 and c0 > e10_0) if confirm_two_bars \
-                     else (c0 > o0 and c0 > e10_0)
+        confirm_ok = (
+            (c1 > o1 and c1 > e10_1 and c1 > e30_1) and
+            (c0 > o0 and c0 > e10_0 and c0 > e30_0)
+        ) if confirm_two_bars else (c0 > o0 and c0 > e10_0 and c0 > e30_0)
     else:
-        confirm_ok = (c1 < o1 and c1 < e10_1) and (c0 < o0 and c0 < e10_0) if confirm_two_bars \
-                     else (c0 < o0 and c0 < e10_0)
+        confirm_ok = (
+            (c1 < o1 and c1 < e10_1 and c1 < e30_1) and
+            (c0 < o0 and c0 < e10_0 and c0 < e30_0)
+        ) if confirm_two_bars else (c0 < o0 and c0 < e10_0 and c0 < e30_0)
     if not confirm_ok:
         return False, {"reason": "confirm_fail"}
 
@@ -803,197 +927,11 @@ def ntx_vote(df: pd.DataFrame, ntx_thr: float) -> bool:
     votes = int(level_ok) + int(mom_ok) + int(slope_ok)
     return votes >= 2
 
-# ==== Yeni Entry Gate Fonksiyonları ====
-def _obv_slope_recent(df: pd.DataFrame, win=OBV_SLOPE_WIN) -> float:
-    s = df['obv'].iloc[-(win+1):-1].astype(float)
-    if s.size < 3 or s.isna().any(): return 0.0
-    x = np.arange(len(s)); m, _ = np.polyfit(x, s.values, 1)
-    return float(m)
-
-def trend_score_from_adx_chop(adx_last: float, chop_last: float) -> float:
-    s_adx = clamp((adx_last - 18.0) / (35.0 - 18.0 + 1e-12), 0.0, 1.0) if np.isfinite(adx_last) else 0.0
-    if not np.isfinite(chop_last): s_chop = 0.0
-    elif chop_last <= CHOP_TREND_MAX: s_chop = 1.0
-    elif chop_last >= CHOP_RANGE_MIN: s_chop = 0.0
-    else:
-        frac = (chop_last - CHOP_TREND_MAX) / (CHOP_RANGE_MIN - CHOP_TREND_MAX + 1e-12)
-        s_chop = 1.0 - 0.85*frac
-    return 0.6*s_adx + 0.4*s_chop
-
-def direction_score(df: pd.DataFrame, side: str) -> float:
-    k = NTX_K_EFF
-    if len(df) < k + 3: return 0.0
-    e10_now, e10_prev = df['ema10'].iloc[-2], df['ema10'].iloc[-2-k]
-    obv_slope = _obv_slope_recent(df, win=OBV_SLOPE_WIN)
-    s_ema = 1.0 if ((e10_now > e10_prev and side=='long') or (e10_now < e10_prev and side=='short')) else 0.0
-    s_obv = 1.0 if ((obv_slope > 0 and side=='long') or (obv_slope < 0 and side=='short')) else 0.0
-    return 0.6*s_ema + 0.4*s_obv
-
-def ntx_soft_score(df: pd.DataFrame, atr_z: float) -> float:
-    if 'ntx' not in df.columns or pd.isna(df['ntx'].iloc[-2]): return 0.0
-    thr = ntx_threshold(atr_z); val = float(df['ntx'].iloc[-2])
-    if val <= thr: return clamp((val/(thr+1e-9))*0.5, 0.0, 0.5)
-    else: return 0.5 + clamp(((val-thr)/(100-thr+1e-9))*0.5, 0.0, 0.5)
-
-def compute_gate_threshold(adx_last: float, chop_last: float) -> float:
-    # Trend rejimi: daha düşük eşik
-    if (np.isfinite(adx_last) and adx_last >= 28.0) or (np.isfinite(chop_last) and chop_last <= CHOP_TREND_MAX):
-        return float(os.getenv("THR_TREND", 0.55))  # 0.60 -> 0.55
-    # Range/flat rejim: daha düşük ama en yüksek eşik
-    if (np.isfinite(adx_last) and adx_last <= 20.0) or (np.isfinite(chop_last) and chop_last >= CHOP_RANGE_MIN):
-        return float(os.getenv("THR_FLAT", 0.67))   # 0.72 -> 0.67
-    # Normal rejim
-    return float(os.getenv("THR_NORM", 0.61))       # 0.66 -> 0.61
-
-def rsi_band_for_regime(adx_last: float, chop_last: float):
-    if (np.isfinite(adx_last) and adx_last >= 28.0) or (np.isfinite(chop_last) and chop_last <= CHOP_TREND_MAX):
-        return RSI_BAND_TREND
-    if (np.isfinite(adx_last) and adx_last <= 20.0) or (np.isfinite(chop_last) and chop_last >= CHOP_RANGE_MIN):
-        return RSI_BAND_FLAT
-    return RSI_BAND_NORM
-
-def momentum_pass(df: pd.DataFrame, side: str, band: tuple[int,int]) -> bool:
-    rsi = float(df['rsi'].iloc[-2]) if 'rsi' in df.columns and pd.notna(df['rsi'].iloc[-2]) else np.nan
-    if not np.isfinite(rsi): return True
-    low, high = band
-    if low <= rsi <= high: return False
-    if side == "long" and rsi < 40: return False
-    if side == "short" and rsi > 60: return False
-    return True
-
-def froth_ok_blended(df: pd.DataFrame, base_K: float, atr_z: float) -> bool:
-    ema_gap = abs(float(df['close'].iloc[-2]) - float(df['ema10'].iloc[-2]))
-    atr_val = float(df['atr'].iloc[-2])
-    if not np.isfinite(ema_gap) or not np.isfinite(atr_val) or atr_val <= 0: return False
-    atr_norm = clamp((atr_z - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
-    K_dyn = clamp(base_K * (1.10 - 0.20*atr_norm), 0.9*base_K, 1.25*base_K)
-    if adx_rising(df): K_dyn = min(K_dyn * 1.07, base_K * 1.25)
-    return ema_gap <= K_dyn * atr_val
-
-def regime_ok_strict(df: pd.DataFrame, side: str) -> bool:
-    e30 = float(df['ema30'].iloc[-2]); e90 = float(df['ema90'].iloc[-2])
-    return (e30 > e90) if side=="long" else (e30 < e90)
-
-def ntx_fatigue(df: pd.DataFrame, k: int = 7) -> bool:
-    if 'ntx' not in df.columns or len(df) < k+2: return False
-    w = df['ntx'].iloc[-(k+1):-1].astype(float)
-    if w.isna().any(): return False
-    diffs = np.diff(w.values)
-    return (diffs > 0).mean() >= 0.8
-
-def entry_gate(df: pd.DataFrame, side: str, atr_z: float, in_retest_window: bool) -> (bool, dict):
-    adx_last = float(df['adx'].iloc[-2]) if pd.notna(df['adx'].iloc[-2]) else np.nan
-    chop_last = float(df['chop'].iloc[-2]) if 'chop' in df.columns and pd.notna(df['chop'].iloc[-2]) else np.nan
-    s_trend = trend_score_from_adx_chop(adx_last, chop_last)
-    s_dir = direction_score(df, side)
-    s_ntx = ntx_soft_score(df, atr_z)
-    score = (GATE_WEIGHTS["TREND"]*s_trend +
-             GATE_WEIGHTS["DIR"]*s_dir +
-             GATE_WEIGHTS["NTX"]*s_ntx)
-    if ema_slope_ok(df, side, use_atr_norm=True, min_norm=0.08):
-        score += 0.05
-    thr_gate = compute_gate_threshold(adx_last, chop_last)
-    pass_soft = (score >= thr_gate)
-    # DI ufak bonus (18-25 bandı)
-    if np.isfinite(adx_last) and 18.0 <= adx_last <= 25.0:
-        di_plus  = float(df['di_plus'].iloc[-2])  if pd.notna(df['di_plus'].iloc[-2])  else np.nan
-        di_minus = float(df['di_minus'].iloc[-2]) if pd.notna(df['di_minus'].iloc[-2]) else np.nan
-        if side=="long"  and np.isfinite(di_plus) and np.isfinite(di_minus) and di_plus>di_minus: score += 0.05
-        if side=="short" and np.isfinite(di_plus) and np.isfinite(di_minus) and di_plus<di_minus: score += 0.05
-        pass_soft = (score >= thr_gate)
-    # Borderline: thr kapısının hemen yanı
-    borderline = (score >= (thr_gate - 0.02)) and (score < thr_gate + 0.03)
-    # Rejim uyumluysa küçük bonus
-    if borderline and regime_ok_strict(df, side):
-        score += 0.02
-        pass_soft = (score >= thr_gate)
-    fk_ok, fk_dbg = fake_filter_v2(df, side=side)
-    froth_ok = froth_ok_blended(df, base_K=FROTH_GUARD_K_ATR, atr_z=atr_z)
-    rsi_band = rsi_band_for_regime(adx_last, chop_last)
-    mom_ok = momentum_pass(df, side=side, band=rsi_band)
-    # Rejim uyumsuz + borderline ise sadece retest penceresi YOKSA fail
-    if borderline and (not regime_ok_strict(df, side)) and (not in_retest_window):
-        pass_soft = False
-    # NTX fatigue: sadece no-squeeze ortamda ve retest penceresi YOKKEN devrede
-    sqz_on = bool(df['lb_sqz_on'].iloc[-2]) if 'lb_sqz_on' in df.columns and pd.notna(df['lb_sqz_on'].iloc[-2]) else False
-    if pass_soft and ntx_fatigue(df) and (not in_retest_window) and (not sqz_on):
-        pass_soft = False
-    passed = pass_soft and fk_ok and froth_ok and mom_ok
-    meta = dict(
-        score=round(score,3), thr=round(thr_gate,2),
-        s_trend=round(s_trend,3), s_dir=round(s_dir,3), s_ntx=round(s_ntx,3),
-        fk_ok=fk_ok, froth_ok=froth_ok, mom_ok=mom_ok, fk_dbg=fk_dbg,
-        adx=adx_last, chop=chop_last, rsi_band=rsi_band,
-        borderline=borderline, regime_ok=regime_ok_strict(df, side),
-        ntx_fatigue=ntx_fatigue(df)
-    )
-    return passed, meta
-
-# ================== Candle Body/Wicks (FakeFilter için) ==================
-def candle_body_wicks(row):
-    o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
-    rng = max(h - l, 1e-12)
-    body = abs(c - o)
-    upper_wick = h - max(o, c)
-    lower_wick = min(o, c) - l
-    return body / rng, upper_wick / rng, lower_wick / rng
-
-# === FakeFilter v2 (Güncellenmiş) ===
-def _ff_params():
-    p = FF_PROFILES.get(FF_ACTIVE_PROFILE, FF_PROFILES["normal"])
-    return (p["FF_BODY_MIN"], p["FF_UPWICK_MAX"], p["FF_DNWICK_MAX"],
-            p["FF_BB_MIN"], p["VOL_MA_RATIO_MIN"], p["VOL_Z_MIN"],
-            p["OBV_SLOPE_WIN"], p["MIN_DVOL_USD"])
-
-def _bb_prox(last, side="long"):
-    if side == "long":
-        num = float(last['close'] - last['bb_mid']); den = float(last['bb_upper'] - last['bb_mid'])
-    else:
-        num = float(last['bb_mid'] - last['close']); den = float(last['bb_mid'] - last['bb_lower'])
-    if not (np.isfinite(num) and np.isfinite(den)) or den <= 0: return 0.0
-    return clamp(num/den, 0.0, 1.0)
-
-def simple_volume_ok(df: pd.DataFrame, side: str) -> (bool, str):
-    FF_BODY_MIN_, FF_UPWICK_MAX_, FF_DNWICK_MAX_, FF_BB_MIN_, VOL_MA_RATIO_MIN_, VOL_Z_MIN_, OBV_WIN_, MIN_DVOL_USD_ = _ff_params()
-    if len(df) < VOL_WIN + 2:
-        return False, "data_short"
-    last = df.iloc[-2]
-    vol = float(last['volume'])
-    close = float(last['close'])
-    vol_ma = float(last['vol_ma'])
-    vol_z = float(last.get('vol_z', np.nan))
-    dvol_usd = vol * close
-    dvol_ref = float((df['close'] * df['volume']).rolling(VOL_WIN).quantile(VOL_Q).iloc[-2])
-    vol_ratio = vol / vol_ma if np.isfinite(vol_ma) and vol_ma > 0 else 1.0
-    if not np.isfinite(vol_z) or not np.isfinite(vol_ratio):
-        return False, "vol_data_invalid"
-    liq_ok = dvol_usd >= max(MIN_DVOL_USD_, 0.85*dvol_ref)
-    vol_ok = (vol_ratio >= VOL_MA_RATIO_MIN_) and (vol_z >= VOL_Z_MIN_)
-    return liq_ok and vol_ok, f"dvol_usd={dvol_usd:.0f}, vol_ratio={vol_ratio:.2f}, vol_z={vol_z:.2f}, ref={dvol_ref:.0f}"
-
-def fake_filter_v2(df: pd.DataFrame, side: str) -> (bool, str):
-    FF_BODY_MIN_, FF_UPWICK_MAX_, FF_DNWICK_MAX_, FF_BB_MIN_, VOL_MA_RATIO_MIN_, VOL_Z_MIN_, OBV_WIN_, MIN_DVOL_USD_ = _ff_params()
-    if len(df) < max(VOL_WIN + 2, OBV_WIN_ + 2):
-        return False, "data_short"
-    last = df.iloc[-2]
-    vol_ok, vol_reason = simple_volume_ok(df, side)
-    body, up, low = candle_body_wicks(last)
-    bb_prox = _bb_prox(last, side=side)
-    obv_slope = _obv_slope_recent(df, win=OBV_WIN_)
-    body_ok = body >= FF_BODY_MIN_
-    wick_ok = (up <= FF_UPWICK_MAX_) if side == "long" else (low <= FF_DNWICK_MAX_)
-    bb_ok = bb_prox >= FF_BB_MIN_
-    obv_ok = (obv_slope > 0) if side == "long" else (obv_slope < 0)
-    score = int(vol_ok) + int(body_ok) + int(wick_ok) + int(bb_ok) + int(obv_ok)
-    all_ok = score >= 3
-    debug = (
-        f"vol={'OK' if vol_ok else 'FAIL'} ({vol_reason}), "
-        f"body={body:.2f} ({'OK' if body_ok else 'FAIL'}), "
-        f"wick={(up if side=='long' else low):.2f} ({'OK' if wick_ok else 'FAIL'}), "
-        f"bb_prox={bb_prox:.2f} ({'OK' if bb_ok else 'FAIL'}), "
-        f"obv_slope={obv_slope:.2f} ({'OK' if obv_ok else 'FAIL'})"
-    )
-    return all_ok, debug
+def compute_retest_cap(adx_last: float, atr_z: float) -> int:
+    adx_norm = clamp(((adx_last or 0) - 21.0) / 15.0, 0.0, 1.0)
+    atr_norm = clamp(((atr_z or 0) - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
+    rmax = 12 + 12 * (1 - adx_norm) + 8 * atr_norm
+    return int(round(clamp(rmax, 12, 32)))
 
 # ================== Sinyal Döngüsü ==================
 async def check_signals(symbol, timeframe='4h'):
@@ -1018,7 +956,7 @@ async def check_signals(symbol, timeframe='4h'):
             ohlcv = await fetch_ohlcv_async(symbol, timeframe, limit=limit_need)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             if df is None or df.empty or len(df) < MIN_BARS:
-                new_symbol_until[symbol] = now + timedelta(minutes=NEW_SYMBOL_COOLDOWN_MIN)
+                new_symbol_until[symbol] = now + timedelta(minutes=cooldown_for_new_symbol(timeframe))
                 await mark_status(symbol, "min_bars", f"bars={len(df) if df is not None else 0}")
                 logger.info(f"{symbol}: Yetersiz veri ({len(df) if df is not None else 0} mum), cooldown.")
                 return
@@ -1036,17 +974,13 @@ async def check_signals(symbol, timeframe='4h'):
         atr_z = rolling_z(df['atr'], LOOKBACK_ATR) if 'atr' in df else 0.0
         _adx = float(adx_last) if np.isfinite(adx_last) else 0.0
         _atrz = float(atr_z) if np.isfinite(atr_z) else 0.0
-        adx_norm = clamp((_adx - 21.0) / 15.0, 0.0, 1.0)
-        atr_norm = clamp((_atrz - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0)
-        # Üst sınır 32 olacak şekilde yeniden ölçekle (min 12, max 32)
-        _rmax = 12 + 12*(1 - adx_norm) + 8*atr_norm
-        RETEST_MAX_K_ADAPT = int(round(clamp(_rmax, 12, 32)))
+        RETEST_MAX_K_ADAPT = compute_retest_cap(_adx, _atrz)
         retest_limit_long = retest_limit_short = RETEST_MAX_K_ADAPT
         if VERBOSE_LOG:
             logger.info(
                 f"{symbol} {timeframe} ADAPT k: retest≤{retest_limit_long}, "
-                f"adx={_adx:.1f} adx_n={adx_norm:.2f} "
-                f"atr_z={_atrz:.2f} atr_n={atr_norm:.2f}"
+                f"adx={_adx:.1f} adx_n={clamp((_adx - 21.0) / 15.0, 0.0, 1.0):.2f} "
+                f"atr_z={_atrz:.2f} atr_n={clamp((_atrz - (-1.0)) / (1.5 - (-1.0)), 0.0, 1.0):.2f}"
             )
         # --- 30/90 kesişmeleri
         e10, e30, e90 = df['ema10'], df['ema30'], df['ema90']
@@ -1062,18 +996,10 @@ async def check_signals(symbol, timeframe='4h'):
         last_dn_idx  = _last_true_idx(cross_dn_3090)
         t = len(df) - 2  # kapalı bar
 
-        # Adaptif üst sınır 12–32 arasında (senin son ayarın)
-        _rmax = 12 + 12*(1 - adx_norm) + 8*atr_norm
-        RETEST_MAX_K_ADAPT = int(round(clamp(_rmax, 12, 32)))
-
         in_window_long  = last_up_idx is not None and (8 <= (t - last_up_idx) <= RETEST_MAX_K_ADAPT)
         in_window_short = last_dn_idx is not None and (8 <= (t - last_dn_idx) <= RETEST_MAX_K_ADAPT)
 
-        # GATE yine eskisi gibi
-        ok_L, meta_L = entry_gate(df, side="long",  atr_z=atr_z, in_retest_window=in_window_long)
-        ok_S, meta_S = entry_gate(df, side="short", atr_z=atr_z, in_retest_window=in_window_short)
-
-        # *** YENİ: retest artık kesişme indeksine ve pencereye bağlı ***
+        # Retest zinciri
         retest_ok_L, retL_meta = False, {"reason": "no_cross"}
         retest_ok_S, retS_meta = False, {"reason": "no_cross"}
         if in_window_long:
@@ -1086,16 +1012,19 @@ async def check_signals(symbol, timeframe='4h'):
                 df, side="short", touch_win=6, reclaim_win=6,
                 cross_idx=last_dn_idx, confirm_two_bars=True, use_shallow_pen=False
             )
-        gate_long, gate_short = ok_L, ok_S
-        closed_candle = df.iloc[-2]
-        is_green = (pd.notna(closed_candle['close']) and pd.notna(closed_candle['open']) and (closed_candle['close'] > closed_candle['open']))
-        is_red = (pd.notna(closed_candle['close']) and pd.notna(closed_candle['open']) and (closed_candle['close'] < closed_candle['open']))
+
+        # LazyBear Squeeze Momentum
         smi_open_green = bool(df['lb_open_green'].iloc[-2]) if 'lb_open_green' in df.columns and pd.notna(df['lb_open_green'].iloc[-2]) else False
-        smi_open_red = bool(df['lb_open_red'].iloc[-2]) if 'lb_open_red' in df.columns and pd.notna(df['lb_open_red'].iloc[-2]) else False
-        chop_last = float(df['chop'].iloc[-2]) if 'chop' in df.columns and pd.notna(df['chop'].iloc[-2]) else np.nan
-        strong_trend = (np.isfinite(adx_last) and adx_last >= 30) or (np.isfinite(chop_last) and chop_last <= 35)
-        cond_lb_L = smi_open_green if not strong_trend else True
-        cond_lb_S = smi_open_red if not strong_trend else True
+        smi_open_red   = bool(df['lb_open_red'].iloc[-2])   if 'lb_open_red'   in df.columns and pd.notna(df['lb_open_red'].iloc[-2])   else False
+
+        # Dip–Tepe sinyalleri
+        dt_bottom, dt_top = dip_tepe_signals(
+            df,
+            atr_len=14, kATR=1.25, minSepBars=8,
+            brkLen=4, brkBufferATR=0.12, seqWinBars=3, bodyMinFrac=0.30
+        )
+
+        # Diverjans
         lookback_div = DIVERGENCE_LOOKBACK
         if len(df) < lookback_div + 5:
             div_bullish = div_bearish = False
@@ -1108,10 +1037,17 @@ async def check_signals(symbol, timeframe='4h'):
         close_last = float(df['close'].iloc[-2])
         e10_last = float(df['ema10'].iloc[-2])
         e30_last = float(df['ema30'].iloc[-2])
-        div_long_ok = (div_bullish and (close_last > e10_last) and (close_last > e30_last) and cond_lb_L and is_green)
-        div_short_ok = (div_bearish and (close_last < e10_last) and (close_last < e30_last) and cond_lb_S and is_red)
-        buy_condition = gate_long and (retest_ok_L or div_long_ok)
-        sell_condition = gate_short and (retest_ok_S or div_short_ok)
+        is_green = (pd.notna(close_last) and pd.notna(df['open'].iloc[-2]) and (close_last > df['open'].iloc[-2]))
+        is_red = (pd.notna(close_last) and pd.notna(df['open'].iloc[-2]) and (close_last < df['open'].iloc[-2]))
+        div_long_ok  = (div_bullish and (close_last > e10_last) and (close_last > e30_last)
+                        and smi_open_green and dt_bottom and is_green)
+        div_short_ok = (div_bearish and (close_last < e10_last) and (close_last < e30_last)
+                        and smi_open_red and dt_top and is_red)
+
+        # Sinyal koşulları
+        buy_condition  = (retest_ok_L and smi_open_green and dt_bottom) or div_long_ok
+        sell_condition = (retest_ok_S and smi_open_red   and dt_top)    or div_short_ok
+
         reason = ""
         ret_meta_str = ""
         if buy_condition:
@@ -1126,30 +1062,27 @@ async def check_signals(symbol, timeframe='4h'):
                 ret_meta_str = retest_meta_human(df, retS_meta)
             else:
                 reason = "RSI-EMA Divergence (BEARISH)"
+
         criteria = [
-            ("gate_long", gate_long),
-            ("gate_short", gate_short),
             ("retest_chain_L", retest_ok_L),
             ("retest_chain_S", retest_ok_S),
             ("div_long_ok", div_long_ok),
             ("div_short_ok", div_short_ok),
-            ("fk_long", meta_L['fk_ok']),
-            ("fk_short", meta_S['fk_ok']),
-            ("froth_long", meta_L['froth_ok']),
-            ("froth_short", meta_S['froth_ok']),
-            ("mom_long", meta_L['mom_ok']),
-            ("mom_short", meta_S['mom_ok']),
             ("k_window_L", in_window_long),
             ("k_window_S", in_window_short),
+            ("smi_green", smi_open_green),
+            ("smi_red", smi_open_red),
+            ("dt_bottom", dt_bottom),
+            ("dt_top", dt_top)
         ]
         await record_crit_batch(criteria)
         if VERBOSE_LOG:
             logger.info(f"{symbol} {timeframe} RETEST_META L:{retL_meta} S:{retS_meta}")
             logger.info(
-                f"{symbol} {timeframe} | GATE L:{gate_long} S:{gate_short} "
-                f"| buy:{buy_condition}({ 'retest' if retest_ok_L else 'divergence' if div_long_ok else '-' }) "
+                f"{symbol} {timeframe} | "
+                f"buy:{buy_condition}({ 'retest' if retest_ok_L else 'divergence' if div_long_ok else '-' }) "
                 f"| sell:{sell_condition}({ 'retest' if retest_ok_S else 'divergence' if div_short_ok else '-' }) "
-                f"| scoreL={meta_L['score']:.3f}/{meta_L['thr']:.2f} fk={meta_L['fk_ok']} froth={meta_L['froth_ok']} mom={meta_L['mom_ok']}"
+                f"| smi_green={smi_open_green} smi_red={smi_open_red} dt_bottom={dt_bottom} dt_top={dt_top}"
             )
         if buy_condition and sell_condition:
             await mark_status(symbol, "skip", "conflicting_signals")
@@ -1212,7 +1145,7 @@ async def check_signals(symbol, timeframe='4h'):
                     logger.info(f"{symbol} {timeframe}: BUY atlandı (cooldown veya aynı bar) 🚫")
                 await mark_status(symbol, "skip", "cooldown_or_same_bar")
             else:
-                entry_price = float(closed_candle['close']) if pd.notna(closed_candle['close']) else np.nan
+                entry_price = float(df['close'].iloc[-2]) if pd.notna(df['close'].iloc[-2]) else np.nan
                 eff_sl_mult = SL_MULTIPLIER + SL_BUFFER
                 sl_atr_abs = eff_sl_mult * atr_value
                 sl_price = entry_price - sl_atr_abs
@@ -1260,7 +1193,7 @@ async def check_signals(symbol, timeframe='4h'):
                     logger.info(f"{symbol} {timeframe}: SELL atlandı (cooldown veya aynı bar) 🚫")
                 await mark_status(symbol, "skip", "cooldown_or_same_bar")
             else:
-                entry_price = float(closed_candle['close']) if pd.notna(closed_candle['close']) else np.nan
+                entry_price = float(df['close'].iloc[-2]) if pd.notna(df['close'].iloc[-2]) else np.nan
                 eff_sl_mult = SL_MULTIPLIER + SL_BUFFER
                 sl_atr_abs = eff_sl_mult * atr_value
                 sl_price = entry_price + sl_atr_abs
